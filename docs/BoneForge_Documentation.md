@@ -7,6 +7,7 @@
 
 - [Getting Started](#getting-started)
   - [What is BoneForge?](#what-is-boneforge)
+  - [Open Blender vs B4Artists Build Split](#open-blender-vs-b4artists-build-split)
   - [Installing BoneForge](#installing-boneforge)
   - [Finding BoneForge in Blender](#finding-boneforge-in-blender)
   - [Where Should I Start?](#where-should-i-start)
@@ -42,6 +43,16 @@ BoneForge is a Blender add-on that helps you prepare 3D avatars for VRChat, VRoi
 
 **What BoneForge adds:** BoneForge adds panels and buttons to Blender that automate the most tedious steps — things like organizing bones, fixing names, setting up physics, and exporting in the right format.
 
+**New in BoneForge BFA 8.4.6:** Smart Combine now makes `atlas_uv` the export UV0 by default after baking. The pre-atlas source UV map is removed from the generated atlas mesh unless **Keep Source UV Maps** is enabled in Advanced settings. The CATS / Material Combiner / UVToolkit-derived controls are now shared with the open Blender build; B4Artists exclusivity remains on the production rigging, control, retarget/export, and host-lockout systems.
+
+**New in BoneForge BFA 8.4.5:** Smart Combine now forces source textures to sample the preserved pre-atlas UV during baking, validates the generated atlas mesh before hiding originals, and resets all atlas faces to the final atlas material slot to prevent gray or scrambled robe/clothing chunks.
+
+**New in BoneForge BFA 8.4.4:** The Material Atlas Combiner adds quality-parity inspection controls before baking: shader/material diagnostics, texture role labels, duplicate/shared source markers, per-material size overrides, packing presets, optional Normal/Emission/Roughness output bakes, and preflight blockers for Metallic/ORM channel packing until that path is verified.
+
+**New in BoneForge BFA 8.4.3:** The Material Atlas Combiner includes selectable UV packing methods inside the existing Material Atlas workflow. It includes Smart Pack, Grid Pack, Seeded Variation, Oriented Pack, Fit 0-1 Bounds, Advanced Variation, and Rotation Step, with UV method details recorded in the debug report and bake ledger.
+
+**New in BoneForge BFA 8.4.2:** The Material Atlas Combiner now targets the generated atlas UV during bake while copied source texture nodes explicitly read the pre-atlas UV. This fixes broken robe/clothing atlas results caused by source textures and the baked atlas sampling different UV maps. The selectable material and texture rows from 8.4.1 remain available, and the B4Artists lockout remains unchanged.
+
 **New in 7.1.3 (preference label cleanup):** Two add-on preference toggles were renamed so they now match the sidebar tab they control. "VRChat Avatar Tools" is now labelled **CATS** (matches the CATS sidebar tab). "Task Board & Sidebar" is now labelled **Rig Builder** (matches the Rig Builder sidebar tab). No tools were removed — only the on/off labels in Edit > Preferences > Add-ons > BoneForge changed.
 
 **New in 7.1.1:** BoneForge now includes the **CATS Plugin** — a complete suite of model preparation tools specifically designed for getting VRChat avatars clean, optimized, and fully configured. CATS lives in its own sidebar tab and uses a pipeline system that guides you through the right order of operations every time.
@@ -50,6 +61,38 @@ BoneForge is a Blender add-on that helps you prepare 3D avatars for VRChat, VRoi
 - It cannot model or sculpt your avatar's body shape
 - It cannot create textures or materials from scratch
 - It cannot upload to VRChat directly (you still need the VRChat Creator Companion / SDK)
+
+---
+
+## Open Blender vs B4Artists Build Split
+
+BoneForge has two 8.4.6 builds with different package boundaries. Matching
+version numbers do not mean the same payload.
+
+| Area | Open Blender BoneForge 8.4.6 | BoneForge BFA 8.4.6 |
+| --- | --- | --- |
+| Host | Standard Blender | Bforartists only |
+| Add-on identity | `BoneForge` | `BoneForge BFA` |
+| Repository | `Axleonex/BoneForge_ALTERNATIVE_CATS_for_5.0_Blender` | `Axleonex/BoneForge_B4Artists` |
+| Release zip | `BoneForge-8.4.6.zip` | `BoneForge-BFA-8.4.6.zip` |
+| CATS avatar cleanup | Included | Included |
+| Material Combiner | Included | Included |
+| UVToolkit-derived Material Combiner controls | Included, including Advanced Variation and Rotation Step | Included, same CATS / Material Combiner / UVToolkit behavior |
+| Basic BoneForge and Mixamo-style avatar helpers | Included | Included |
+| BFA host lockout | Not included | Included |
+| Production control-rig construction | Not included | B4Artists-exclusive |
+| Smart landmark / joint detection suite | Not included as a BFA production suite | B4Artists-exclusive |
+| Animator control layer | Not included | B4Artists-exclusive |
+| Control Picker / rig UI | Not included | B4Artists-exclusive |
+| Advanced retargeting core and source maps | Not included as a BFA production suite | B4Artists-exclusive |
+| Profile-driven game export | Not included as a BFA production suite | B4Artists-exclusive |
+| BFA marker files | Must not contain `bfa_guard.py` or `BFA_EXCLUSIVE.md` | Must contain `bfa_guard.py` and `BFA_EXCLUSIVE.md` |
+
+The open Blender build is the non-exclusive standard-Blender package. It now
+receives the complete CATS, Material Combiner, and UVToolkit-derived workflow.
+The B4Artists build remains the exclusive package for the production rigging
+suite, host lockout, control rig builder, animator controls, control picker,
+advanced retarget/export systems, and Bforartists-specific packaging.
 
 ---
 
@@ -1929,9 +1972,18 @@ This is the same atlas process available in the main VRChat tab, presented with 
 **Key controls:**
 - **Analyze** — Shows your current material count and estimated savings
 - **Atlas Resolution** — Size of the combined texture output (1024 / 2048 / 4096 pixels)
+- **Material rows** - Let you disable individual material slots and inspect diagnostics, duplicate groups, and size overrides
+- **Texture rows** - Let you disable individual image nodes and inspect or override their role labels
+- **UV Method** - Chooses how the atlas work mesh is unwrapped and packed before baking
+- **UV Seed** - Controls deterministic variation for seeded UV packing
+- **Packing Preset / Bake Padding** - Records atlas quality settings and controls bake edge padding
+- **Bake Passes** - Albedo is the default; Normal, Emission, and Roughness can be explicitly baked as separate outputs; Metallic and ORM channel packing are blocked until their source path is verified
+- **Rotation Step** - Controls advanced seeded UV island rotation
 - **Bake Atlas** — Combines all materials and shows a preview
 - **Accept** — Commits the atlas and replaces your original materials
 - **Revert** — Undoes the atlas and restores your original materials
+
+**Lineage credits:** This workflow continues the BoneForge CATS integration lineage, credits the original Cats Blender Plugin, credits Grim-es/material-combiner-addon for the Material Combiner lineage, and credits UV Toolkit by Alexander Belyakov plus the oRazeD/UVToolkit archival repository for UV workflow inspiration. BoneForge implements its own integrated atlas UV helpers instead of vendoring UVToolkit source.
 
 **Where to find it:** CATS tab → Material Atlas section
 

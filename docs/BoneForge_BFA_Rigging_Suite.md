@@ -5,6 +5,12 @@ top of BoneForge. Every feature below is BoneForge-native and registers only
 inside Bforartists. All bone names use the BoneForge convention `base-Side`
 (hyphen side suffix, e.g. `upperarm.fk-L`, `roll_heel-L`).
 
+Scope note: CATS, Material Combiner, and UVToolkit-derived Material Combiner
+controls are shared with the open Blender build as of BoneForge 8.4.6. This
+document covers what still remains B4Artists-exclusive: the production rigging
+suite, host lockout, control rig builder, animator controls, control picker,
+advanced retarget/export systems, and Bforartists-specific packaging.
+
 ## Control-Rig Construction Engine
 
 The engine turns a marker/preset description (`RigSpec`) into a full control

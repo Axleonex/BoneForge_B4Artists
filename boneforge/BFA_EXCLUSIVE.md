@@ -1,6 +1,6 @@
-# BoneForge BFA 8.3.1 — Bforartists-Exclusive Build
+# BoneForge BFA 8.4.3 — Bforartists-Exclusive Build
 
-This build is functionally identical to BoneForge 8.3.1 but runs **only
+This build follows the BoneForge 8.3.3 open-Blender baseline with B4Artists-exclusive additions and runs **only
 in Bforartists**. In standard Blender it enables as an inert stub: a
 preferences notice, an error popup, and a "Get Bforartists" button.
 No panels, operators, properties, or feature packages are registered.

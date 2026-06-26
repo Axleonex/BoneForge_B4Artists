@@ -967,9 +967,9 @@ class BF_PT_sb_vrchat(Panel):
         layout.separator(factor=0.3)
         col = layout.column(align=True)
         col.scale_y = 0.8
-        col.label(text=T("A — Foundation: clean up, name, humanoid setup."), icon='SEQUENCE_COLOR_01')
-        col.label(text=T("B — Body & Physics: hair, clothing, visemes."),    icon='SEQUENCE_COLOR_04')
-        col.label(text=T("C — Finalize: performance check, then export."),   icon='SEQUENCE_COLOR_05')
+        col.label(text=T("A — Foundation: clean up, name, humanoid setup."), icon='STRIP_COLOR_01')
+        col.label(text=T("B — Body & Physics: hair, clothing, visemes."),    icon='STRIP_COLOR_04')
+        col.label(text=T("C — Finalize: performance check, then export."),   icon='STRIP_COLOR_05')
 
         layout.separator(factor=0.3)
         cats_hint = layout.box()

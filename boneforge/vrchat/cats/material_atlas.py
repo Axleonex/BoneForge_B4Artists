@@ -34,6 +34,39 @@ from bpy.types import Operator, Panel, PropertyGroup, UIList
 
 from boneforge.core import active_armature
 from boneforge.vrchat.cats import pipeline
+from boneforge.vrchat.cats.uv_tools import (
+    apply_atlas_uv_method,
+    atlas_uv_method_items,
+    get_uv_method_label,
+    method_uses_seed,
+    summarize_atlas_uv_result,
+)
+from boneforge.vrchat.cats.material_atlas_quality import (
+    CHANNEL_PACK_CONVENTION,
+    PACKING_PRESETS,
+    ROLE_ALBEDO,
+    ROLE_AO,
+    ROLE_EMISSION,
+    ROLE_METALLIC,
+    ROLE_NORMAL,
+    ROLE_ROUGHNESS,
+    ROLE_UNKNOWN,
+    MaterialSource,
+    TextureSource,
+    build_channel_pack_plan,
+    build_multipass_output_plan,
+    detect_texture_role,
+    diagnose_material,
+    diagnose_texture,
+    duplicate_texture_key,
+    find_duplicate_texture_groups,
+    find_shared_material_groups,
+    format_quality_debug_report,
+    packing_preset_settings,
+    resolve_size_preset,
+    role_color_space,
+    role_label,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +83,36 @@ _RENDER_TYPES = ["Opaque", "Alpha Clip", "Alpha Blend", "Emissive"]
 _VRAM_MIP_FACTOR = 1.33
 
 _BACKUP_COLLECTION_PREFIX = "BF_Atlas_Backup_"
+
+_TEXTURE_ROLE_ITEMS = [
+    (ROLE_ALBEDO, role_label(ROLE_ALBEDO), "Base color / diffuse source"),
+    (ROLE_NORMAL, role_label(ROLE_NORMAL), "Normal map source"),
+    (ROLE_EMISSION, role_label(ROLE_EMISSION), "Emission source"),
+    (ROLE_METALLIC, role_label(ROLE_METALLIC), "Metallic utility map"),
+    (ROLE_ROUGHNESS, role_label(ROLE_ROUGHNESS), "Roughness utility map"),
+    (ROLE_AO, role_label(ROLE_AO), "Ambient occlusion utility map"),
+    (ROLE_UNKNOWN, role_label(ROLE_UNKNOWN), "Unclassified texture source"),
+]
+
+_SIZE_PRESET_ITEMS = [
+    ("SOURCE", "Source", "Use the detected source texture dimensions"),
+    ("512", "512", "Use 512 x 512"),
+    ("1024", "1024", "Use 1024 x 1024"),
+    ("2048", "2048", "Use 2048 x 2048"),
+    ("4096", "4096", "Use 4096 x 4096"),
+    ("CUSTOM", "Custom", "Use the material row width and height"),
+]
+
+_PACKING_PRESET_ITEMS = [
+    (key, spec["label"], f"Margin {spec['uv_margin']}, padding {spec['padding_pixels']}px")
+    for key, spec in PACKING_PRESETS.items()
+]
+
+_EXTRA_BAKE_PASSES = {
+    ROLE_NORMAL: {"type": "NORMAL", "suffix": "_normal", "colorspace": "Non-Color"},
+    ROLE_EMISSION: {"type": "EMIT", "suffix": "_emission", "colorspace": "sRGB"},
+    ROLE_ROUGHNESS: {"type": "ROUGHNESS", "suffix": "_roughness", "colorspace": "Non-Color"},
+}
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -136,13 +199,592 @@ def _target_meshes(context, settings=None):
     ]
 
 
-def _iter_texture_images(mat):
-    """Yield image datablocks used by texture nodes in a material."""
+def _find_view3d_context_override(context):
+    """Return a VIEW_3D override for bpy operators that need UI context."""
+    wm = getattr(context, "window_manager", None)
+    if wm is None:
+        return None
+    for window in wm.windows:
+        screen = getattr(window, "screen", None)
+        if screen is None:
+            continue
+        for area in screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            for region in area.regions:
+                if region.type == "WINDOW":
+                    return {
+                        "window": window,
+                        "screen": screen,
+                        "area": area,
+                        "region": region,
+                    }
+    return None
+
+
+def _run_with_view3d_context(context, op_call, stage: str, **kwargs):
+    """Run an operator with a VIEW_3D override when one is available."""
+    override = _find_view3d_context_override(context)
+    try:
+        if override:
+            with context.temp_override(**override):
+                return op_call(**kwargs)
+        return op_call(**kwargs)
+    except Exception as exc:
+        raise RuntimeError(f"{stage} failed: {exc}") from exc
+
+
+def _ensure_object_mode(context, stage: str):
+    """Leave edit/pose mode before object-level atlas operations."""
+    obj = getattr(context, "object", None)
+    if obj is not None and getattr(obj, "mode", "OBJECT") != "OBJECT":
+        _run_with_view3d_context(context, bpy.ops.object.mode_set, stage, mode="OBJECT")
+
+
+def _deselect_all_objects_directly(view_layer):
+    """Deselect objects without bpy.ops.object.select_all poll requirements."""
+    for obj in view_layer.objects:
+        try:
+            obj.select_set(False)
+        except RuntimeError:
+            pass
+
+
+def _iter_material_slots(obj):
+    """Yield object material slots as (object, slot_index, material)."""
+    if obj is None or getattr(obj, "type", None) != "MESH":
+        return
+    for slot_index, mat in enumerate(obj.data.materials):
+        yield obj, slot_index, mat
+
+
+def _iter_texture_nodes(mat):
+    """Yield image texture nodes and image datablocks in a material."""
     if not mat or not mat.use_nodes or not mat.node_tree:
         return
     for node in mat.node_tree.nodes:
         if node.type == "TEX_IMAGE":
-            yield node.image
+            yield node, node.image
+
+
+def _iter_texture_images(mat):
+    """Yield image datablocks used by texture nodes in a material."""
+    for _node, image in _iter_texture_nodes(mat):
+        yield image
+
+
+def _detect_texture_node_role(node) -> str:
+    """Infer semantic role for an image texture node from its outgoing links."""
+    if node is None:
+        return ROLE_UNKNOWN
+    for output in node.outputs:
+        for link in output.links:
+            to_node = link.to_node
+            role = detect_texture_role(
+                getattr(link.to_socket, "name", ""),
+                node_name=getattr(to_node, "name", ""),
+                output_name=getattr(output, "name", ""),
+                via_node_type=getattr(to_node, "type", ""),
+            )
+            if role != ROLE_UNKNOWN:
+                return role
+            for mid_output in getattr(to_node, "outputs", []):
+                for mid_link in mid_output.links:
+                    role = detect_texture_role(
+                        getattr(mid_link.to_socket, "name", ""),
+                        node_name=getattr(mid_link.to_node, "name", ""),
+                        output_name=getattr(mid_output, "name", ""),
+                        via_node_type=getattr(to_node, "type", ""),
+                    )
+                    if role != ROLE_UNKNOWN:
+                        return role
+    return ROLE_UNKNOWN
+
+
+def _material_shader_type(mat) -> str:
+    if not mat:
+        return "EMPTY_SLOT"
+    if not mat.use_nodes or not mat.node_tree:
+        return "NO_NODE_TREE"
+    for node in mat.node_tree.nodes:
+        if node.type != "OUTPUT_MATERIAL":
+            continue
+        surface = node.inputs.get("Surface")
+        if surface and surface.is_linked:
+            source = surface.links[0].from_node
+            return getattr(source, "type", "") or getattr(source, "bl_idname", "")
+    for node in mat.node_tree.nodes:
+        if node.type.startswith("BSDF") or node.type in {"EMISSION", "GROUP"}:
+            return node.type
+    return "UNKNOWN_SHADER"
+
+
+def _material_emission_strength(mat) -> float:
+    if not mat or not mat.use_nodes or not mat.node_tree:
+        return 0.0
+    for node in mat.node_tree.nodes:
+        if node.type != "BSDF_PRINCIPLED":
+            continue
+        strength = node.inputs.get("Emission Strength")
+        if strength and hasattr(strength, "default_value"):
+            return float(strength.default_value or 0.0)
+    return 0.0
+
+
+def _texture_quality_source(mat_name, node, image) -> TextureSource:
+    return TextureSource(
+        material_name=mat_name or "",
+        node_name=node.name if node else "",
+        image_name=image.name if image else "",
+        image_path=bpy.path.abspath(image.filepath) if image and image.filepath else "",
+        width=int(image.size[0]) if image else 0,
+        height=int(image.size[1]) if image else 0,
+        colorspace=(
+            image.colorspace_settings.name
+            if image and image.colorspace_settings
+            else ""
+        ),
+        packed=bool(image and image.packed_file),
+        missing=image is None,
+        socket_name="",
+        output_name="",
+        via_node_type="",
+        role=_detect_texture_node_role(node),
+        enabled=image is not None,
+    )
+
+
+def _material_quality_source(obj, slot_index, mat) -> MaterialSource:
+    mat_name = mat.name if mat else "<empty>"
+    textures = tuple(
+        _texture_quality_source(mat_name, node, image)
+        for node, image in _iter_texture_nodes(mat)
+    )
+    return MaterialSource(
+        material_name=mat_name,
+        object_name=obj.name if obj else "",
+        slot_index=slot_index,
+        shader_type=_material_shader_type(mat),
+        use_nodes=bool(mat and mat.use_nodes),
+        has_node_tree=bool(mat and mat.node_tree),
+        textures=textures,
+        alpha_mode=getattr(mat, "alpha_method", "") if mat else "",
+        blend_method=getattr(mat, "blend_method", "") if mat else "",
+        emission_strength=_material_emission_strength(mat),
+    )
+
+
+def _group_texture_quality_sources(group):
+    return [
+        TextureSource(
+            material_name=item.material_name,
+            node_name=item.node_name,
+            image_name="" if item.missing else item.image_name,
+            image_path=item.image_path,
+            width=item.width,
+            height=item.height,
+            colorspace=item.colorspace,
+            packed=item.packed,
+            missing=item.missing,
+            role=item.role,
+            enabled=item.enabled,
+        )
+        for item in getattr(group, "textures", [])
+    ]
+
+
+def _material_source_size(group, material_item):
+    for tex in getattr(group, "textures", []):
+        if (
+            tex.object_name == material_item.object_name
+            and tex.slot_index == material_item.slot_index
+            and tex.material_name == material_item.material_name
+            and tex.width > 0
+            and tex.height > 0
+        ):
+            return tex.width, tex.height
+    return 0, 0
+
+
+def _settings_enabled_passes(settings):
+    passes = []
+    if settings.bake_albedo:
+        passes.append(ROLE_ALBEDO)
+    if settings.bake_normal:
+        passes.append(ROLE_NORMAL)
+    if settings.bake_emission:
+        passes.append(ROLE_EMISSION)
+    if getattr(settings, "bake_metallic", False):
+        passes.append(ROLE_METALLIC)
+    if settings.bake_roughness:
+        passes.append(ROLE_ROUGHNESS)
+    return passes
+
+
+def _material_key(object_name, slot_index, material_name):
+    return (object_name, int(slot_index), material_name or "")
+
+
+def _texture_key(object_name, slot_index, material_name, node_name, image_name):
+    return (
+        object_name,
+        int(slot_index),
+        material_name or "",
+        node_name or "",
+        image_name or "",
+    )
+
+
+def _group_detected_material_count(group) -> int:
+    if hasattr(group, "materials") and len(group.materials):
+        return len(group.materials)
+    return int(getattr(group, "mat_count", 0))
+
+
+def _group_enabled_material_count(group) -> int:
+    if hasattr(group, "materials") and len(group.materials):
+        return sum(1 for item in group.materials if item.enabled)
+    return int(getattr(group, "mat_count", 0))
+
+
+def _group_enabled_texture_count(group) -> int:
+    if hasattr(group, "textures") and len(group.textures):
+        return sum(1 for item in group.textures if item.enabled)
+    return 0
+
+
+def _enabled_material_keys(group):
+    if not hasattr(group, "materials") or not len(group.materials):
+        return None
+    return {
+        _material_key(item.object_name, item.slot_index, item.material_name)
+        for item in group.materials
+        if item.enabled
+    }
+
+
+def _enabled_texture_keys(group):
+    if not hasattr(group, "textures") or not len(group.textures):
+        return None
+    return {
+        _texture_key(
+            item.object_name,
+            item.slot_index,
+            item.material_name,
+            item.node_name,
+            item.image_name,
+        )
+        for item in group.textures
+        if item.enabled and not item.missing
+    }
+
+
+def _enabled_slots_by_object(group):
+    result = {}
+    enabled_keys = _enabled_material_keys(group)
+    if enabled_keys is None:
+        for mesh_item in group.meshes:
+            obj = bpy.data.objects.get(mesh_item.object_name)
+            if obj and obj.type == "MESH":
+                result[obj.name] = set(range(len(obj.data.materials)))
+        return result
+
+    for item in group.materials:
+        if not item.enabled:
+            continue
+        result.setdefault(item.object_name, set()).add(int(item.slot_index))
+    return result
+
+
+def _detected_slots_by_object(group):
+    result = {}
+    if hasattr(group, "materials") and len(group.materials):
+        for item in group.materials:
+            result.setdefault(item.object_name, set()).add(int(item.slot_index))
+        return result
+    for mesh_item in group.meshes:
+        obj = bpy.data.objects.get(mesh_item.object_name)
+        if obj and obj.type == "MESH":
+            result[obj.name] = set(range(len(obj.data.materials)))
+    return result
+
+
+def _populate_group_sources(group, objs):
+    """Populate selectable material and texture rows for a group."""
+    group.materials.clear()
+    group.textures.clear()
+    material_pairs = []
+    texture_pairs = []
+
+    for obj in objs:
+        for _obj, slot_index, mat in _iter_material_slots(obj):
+            mat_name = mat.name if mat else "<empty>"
+            tex_nodes = list(_iter_texture_nodes(mat))
+            mat_source = _material_quality_source(obj, slot_index, mat)
+            mat_report = diagnose_material(mat_source)
+            color_spaces = {
+                image.colorspace_settings.name
+                for _node, image in tex_nodes
+                if image and image.colorspace_settings
+            }
+
+            mat_item = group.materials.add()
+            mat_item.enabled = True
+            mat_item.object_name = obj.name
+            mat_item.slot_index = slot_index
+            mat_item.material_name = mat_name
+            mat_item.render_type = _classify_material(mat)
+            mat_item.texture_count = len(tex_nodes)
+            mat_item.has_no_images = len(tex_nodes) == 0
+            mat_item.has_missing_image = any(image is None for _node, image in tex_nodes)
+            mat_item.has_mixed_colorspace = len(color_spaces) > 1
+            mat_item.diagnostic_status = mat_report["status"]
+            mat_item.diagnostic_warnings = "; ".join(mat_report["warnings"])
+            mat_item.duplicate_group = ""
+            mat_item.fallback_size = 512
+            material_pairs.append((mat_item, mat_source))
+
+            for node, image in tex_nodes:
+                tex_source = _texture_quality_source(mat_name, node, image)
+                tex_report = diagnose_texture(tex_source)
+                tex_item = group.textures.add()
+                tex_item.enabled = image is not None
+                tex_item.object_name = obj.name
+                tex_item.slot_index = slot_index
+                tex_item.material_name = mat_name
+                tex_item.node_name = node.name
+                tex_item.image_name = image.name if image else "<missing>"
+                tex_item.image_path = bpy.path.abspath(image.filepath) if image and image.filepath else ""
+                tex_item.width = int(image.size[0]) if image else 0
+                tex_item.height = int(image.size[1]) if image else 0
+                tex_item.colorspace = (
+                    image.colorspace_settings.name
+                    if image and image.colorspace_settings
+                    else ""
+                )
+                tex_item.packed = bool(image and image.packed_file)
+                tex_item.missing = image is None
+                tex_item.role = tex_source.role
+                tex_item.role_label = role_label(tex_source.role)
+                tex_item.expected_colorspace = str(tex_report["colorspace_expected"])
+                tex_item.diagnostic_status = str(tex_report["status"])
+                tex_item.diagnostic_warnings = "; ".join(tex_report["warnings"])
+                tex_item.duplicate_group = ""
+                texture_pairs.append((tex_item, tex_source))
+
+    texture_duplicates = find_duplicate_texture_groups(
+        [source for _item, source in texture_pairs]
+    )
+    for duplicate_index, duplicate in enumerate(texture_duplicates, start=1):
+        key = duplicate["key"]
+        marker = f"T{duplicate_index}"
+        for item, source in texture_pairs:
+            if duplicate_texture_key(source) == key:
+                item.duplicate_group = marker
+
+    material_duplicates = find_shared_material_groups(
+        [source for _item, source in material_pairs]
+    )
+    for duplicate_index, duplicate in enumerate(material_duplicates, start=1):
+        marker = f"M{duplicate_index}"
+        names = set(duplicate["materials"])
+        for item, _source in material_pairs:
+            if item.material_name in names:
+                item.duplicate_group = marker
+
+    group.duplicate_count = len(texture_duplicates) + len(material_duplicates)
+    group.unknown_texture_roles = sum(
+        1 for item in group.textures if item.role == ROLE_UNKNOWN
+    )
+    material_warnings = sum(1 for item in group.materials if item.diagnostic_warnings)
+    texture_warnings = sum(1 for item in group.textures if item.diagnostic_warnings)
+    group.quality_summary = (
+        f"{material_warnings} material warning(s), "
+        f"{texture_warnings} texture warning(s), "
+        f"{group.duplicate_count} duplicate/shared group(s), "
+        f"{group.unknown_texture_roles} unknown role(s)"
+    )
+    if material_warnings or texture_warnings or group.duplicate_count or group.unknown_texture_roles:
+        group.has_warnings = True
+
+
+def _copy_material_slots(mesh):
+    for mat_index, mat in enumerate(mesh.materials):
+        if mat is not None:
+            mesh.materials[mat_index] = mat.copy()
+
+
+def _remove_faces_by_material_slots(obj, slots_to_remove):
+    """Remove faces assigned to material slots in *slots_to_remove*."""
+    if not slots_to_remove:
+        return len(obj.data.polygons) > 0
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(obj.data)
+        faces = [face for face in bm.faces if face.material_index in slots_to_remove]
+        if faces:
+            bmesh.ops.delete(bm, geom=faces, context="FACES")
+            bm.to_mesh(obj.data)
+            obj.data.update()
+    finally:
+        bm.free()
+    return len(obj.data.polygons) > 0
+
+
+def _disconnect_disabled_texture_nodes(mat, object_name, slot_index, material_name, enabled_texture_keys):
+    if enabled_texture_keys is None or not mat or not mat.use_nodes or not mat.node_tree:
+        return
+    links = mat.node_tree.links
+    for node, image in _iter_texture_nodes(mat):
+        key = _texture_key(
+            object_name,
+            slot_index,
+            material_name,
+            node.name,
+            image.name if image else "<missing>",
+        )
+        if key in enabled_texture_keys:
+            continue
+        for output in node.outputs:
+            for link in list(output.links):
+                links.remove(link)
+
+
+def _ensure_source_uv_node(nodes, uv_map_name, location):
+    uv_node = nodes.get("BF_ATLAS_SOURCE_UV")
+    if uv_node is None:
+        uv_node = nodes.new("ShaderNodeUVMap")
+        uv_node.name = "BF_ATLAS_SOURCE_UV"
+        uv_node.label = "BoneForge Source UV"
+        uv_node.location = location
+    uv_node.uv_map = uv_map_name
+    return uv_node
+
+
+def _uses_uv_map_node(node):
+    return (
+        getattr(node, "type", "") == "UVMAP"
+        or getattr(node, "bl_idname", "") == "ShaderNodeUVMap"
+    )
+
+
+def _preserve_explicit_uv_map_node(node, uv_map_name):
+    if not _uses_uv_map_node(node):
+        return False
+    if not getattr(node, "uv_map", ""):
+        node.uv_map = uv_map_name
+    return True
+
+
+def _route_vector_socket_to_uv(links, vector_input, uv_node):
+    if vector_input is None:
+        return False
+
+    if not vector_input.is_linked:
+        links.new(uv_node.outputs["UV"], vector_input)
+        return True
+
+    for link in list(vector_input.links):
+        if _preserve_explicit_uv_map_node(link.from_node, uv_node.uv_map):
+            return True
+        upstream_input = getattr(link.from_node, "inputs", {}).get("Vector")
+        if upstream_input is None:
+            continue
+        for old_link in list(upstream_input.links):
+            if _preserve_explicit_uv_map_node(old_link.from_node, uv_node.uv_map):
+                return True
+        for old_link in list(upstream_input.links):
+            links.remove(old_link)
+        links.new(uv_node.outputs["UV"], upstream_input)
+        return True
+
+    for link in list(vector_input.links):
+        links.remove(link)
+    links.new(uv_node.outputs["UV"], vector_input)
+    return True
+
+
+def _route_source_image_nodes_to_uv(mat, uv_map_name):
+    """Make copied source textures sample the original UV while baking to atlas_uv."""
+    if not mat or not mat.use_nodes or not mat.node_tree:
+        return 0
+
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    routed = 0
+    for node, image in _iter_texture_nodes(mat):
+        if node.name == "BF_ATLAS_TARGET" or image is None:
+            continue
+        vector_input = node.inputs.get("Vector")
+        uv_node = _ensure_source_uv_node(
+            nodes,
+            uv_map_name,
+            (node.location.x - 240, node.location.y),
+        )
+        if _route_vector_socket_to_uv(links, vector_input, uv_node):
+            routed += 1
+    return routed
+
+
+def _assign_single_atlas_material(mesh, atlas_mat):
+    mesh.materials.clear()
+    mesh.materials.append(atlas_mat)
+    for poly in mesh.polygons:
+        poly.material_index = 0
+    mesh.update()
+
+
+def _validate_atlas_mesh(obj, atlas_mat):
+    mesh = obj.data
+    errors = []
+    atlas_index = next(
+        (i for i, uv in enumerate(mesh.uv_layers) if uv.name == "atlas_uv"),
+        None,
+    )
+    if atlas_index is None:
+        errors.append("missing atlas_uv map")
+    elif not getattr(mesh.uv_layers[atlas_index], "active_render", False):
+        errors.append("atlas_uv is not the active render UV")
+    if not mesh.materials or mesh.materials[0] != atlas_mat:
+        errors.append("atlas material is not slot 0")
+    stale_faces = sum(1 for poly in mesh.polygons if poly.material_index != 0)
+    if stale_faces:
+        errors.append(f"{stale_faces} face(s) still point to old material slots")
+    if errors:
+        raise RuntimeError("Atlas validation failed: " + "; ".join(errors))
+
+
+def _activate_atlas_uv(mesh):
+    for index, uv in enumerate(mesh.uv_layers):
+        is_atlas = uv.name == "atlas_uv"
+        uv.active_render = is_atlas
+        if is_atlas:
+            try:
+                mesh.uv_layers.active_index = index
+            except Exception:
+                uv.active = True
+    return "atlas_uv" in mesh.uv_layers
+
+
+def _prepare_atlas_uv_for_export(mesh, keep_source_uv_maps):
+    if "atlas_uv" not in mesh.uv_layers:
+        return False
+    if not keep_source_uv_maps:
+        for uv in list(mesh.uv_layers):
+            if uv.name != "atlas_uv":
+                mesh.uv_layers.remove(uv)
+    return _activate_atlas_uv(mesh)
+
+
+def _cleanup_transient_atlas_objects():
+    """Remove internal atlas work objects left by failed bake stages."""
+    for obj in list(bpy.data.objects):
+        if (
+            obj.name.startswith("__BF_ATLAS_")
+            or obj.name.startswith("__BF_ATLAS_WORK_")
+            or obj.name.startswith("ATLAS_KEEP_")
+        ):
+            bpy.data.objects.remove(obj, do_unlink=True)
 
 
 def _build_debug_report(meshes, settings) -> str:
@@ -152,8 +794,15 @@ def _build_debug_report(meshes, settings) -> str:
         f"Scope: {getattr(settings, 'target_scope', 'ACTIVE_ARMATURE')}",
         f"Meshes scanned: {len(meshes)}",
         f"Output: {settings.output_format} -> {bpy.path.abspath(settings.output_path)}",
+        f"UV method: {get_uv_method_label(getattr(settings, 'pack_method', 'BEST_FIT'))}",
+        f"UV margin: {getattr(settings, 'uv_margin', 0.02)}",
+        f"Packing preset: {packing_preset_settings(getattr(settings, 'packing_preset', 'SAFE_DEFAULT'))['label']}",
+        f"Bake padding: {getattr(settings, 'atlas_padding_pixels', 4)} px",
         "",
     ]
+    if method_uses_seed(getattr(settings, "pack_method", "")):
+        lines.insert(5, f"UV seed: {getattr(settings, 'uv_random_seed', 1337)}")
+        lines.insert(6, f"UV rotation step: {getattr(settings, 'uv_rotation_step', '90')}")
 
     if not meshes:
         lines.append("ERROR: No mesh objects were found for the current scope.")
@@ -162,6 +811,8 @@ def _build_debug_report(meshes, settings) -> str:
     seen_images = {}
     total_materials = 0
     problem_count = 0
+    quality_materials = []
+    quality_textures = []
 
     for obj in meshes:
         mesh = obj.data
@@ -178,22 +829,30 @@ def _build_debug_report(meshes, settings) -> str:
                 continue
 
             render_type = _classify_material(mat)
+            mat_source = _material_quality_source(obj, slot_index, mat)
+            mat_report = diagnose_material(mat_source)
+            quality_materials.append(mat_source)
             if not mat.use_nodes or not mat.node_tree:
                 problem_count += 1
                 lines.append(
-                    f"  [{slot_index}] {mat.name} | {render_type} | WARNING: material has no node tree"
+                    f"  [{slot_index}] {mat.name} | {render_type} | "
+                    f"{mat_report['status']} | WARNING: material has no node tree"
                 )
                 continue
 
-            images = [img for img in _iter_texture_images(mat)]
-            if not images:
+            tex_nodes = list(_iter_texture_nodes(mat))
+            if not tex_nodes:
                 problem_count += 1
                 lines.append(
-                    f"  [{slot_index}] {mat.name} | {render_type} | WARNING: no image texture nodes"
+                    f"  [{slot_index}] {mat.name} | {render_type} | "
+                    f"{mat_report['status']} | WARNING: no image texture nodes"
                 )
                 continue
 
-            for img in images:
+            for node, img in tex_nodes:
+                tex_source = _texture_quality_source(mat.name, node, img)
+                tex_report = diagnose_texture(tex_source)
+                quality_textures.append(tex_source)
                 if img is None:
                     problem_count += 1
                     lines.append(f"  [{slot_index}] {mat.name} | ERROR: image node has no image")
@@ -204,6 +863,7 @@ def _build_debug_report(meshes, settings) -> str:
                 path = bpy.path.abspath(img.filepath) if img.filepath else "<unsaved or generated>"
                 lines.append(
                     f"  [{slot_index}] {mat.name} | {render_type} | "
+                    f"role={tex_report['role_label']} | "
                     f"image={img.name} {img.size[0]}x{img.size[1]} {packed} | {path}"
                 )
 
@@ -226,6 +886,41 @@ def _build_debug_report(meshes, settings) -> str:
         lines.append("NOTE: Mixed source image sizes are supported, but small images may soften in a large atlas.")
     if len(color_spaces) > 1:
         lines.append("NOTE: Mixed color spaces detected. Verify the baked atlas visually before Accept.")
+
+    if quality_materials or quality_textures:
+        lines.extend([
+            "",
+            format_quality_debug_report(
+                quality_materials,
+                quality_textures,
+                size_preset="SOURCE",
+                packing_preset=getattr(settings, "packing_preset", "SAFE_DEFAULT"),
+                enabled_passes=_settings_enabled_passes(settings),
+                channel_pack=getattr(settings, "channel_pack_orm", False),
+            ),
+        ])
+
+    if getattr(settings, "atlas_groups", None):
+        lines.extend(["", "Selectable row state:"])
+        for group in settings.atlas_groups:
+            lines.append(
+                f"- {group.name}: enabled={group.enabled}, "
+                f"summary={getattr(group, 'quality_summary', '') or 'none'}"
+            )
+            for mat_item in getattr(group, "materials", []):
+                state = "on" if mat_item.enabled else "off"
+                duplicate = f", duplicate={mat_item.duplicate_group}" if mat_item.duplicate_group else ""
+                lines.append(
+                    f"  material {state}: {mat_item.object_name}[{mat_item.slot_index}] "
+                    f"{mat_item.material_name} | {mat_item.diagnostic_status}{duplicate}"
+                )
+            for tex_item in getattr(group, "textures", []):
+                state = "on" if tex_item.enabled else "off"
+                duplicate = f", duplicate={tex_item.duplicate_group}" if tex_item.duplicate_group else ""
+                lines.append(
+                    f"  texture {state}: {tex_item.material_name}/{tex_item.node_name} "
+                    f"{tex_item.image_name} | role={role_label(tex_item.role)}{duplicate}"
+                )
 
     return "\n".join(lines)
 
@@ -294,19 +989,25 @@ def _projected_mat_count(settings) -> int:
     """Count projected atlas material count from current group config."""
     total = 0
     for group in settings.atlas_groups:
-        if not group.enabled or group.mat_count == 0:
-            total += group.mat_count
+        detected = _group_detected_material_count(group)
+        enabled = _group_enabled_material_count(group)
+        if not group.enabled or detected == 0:
+            total += detected
             continue
-        if group.mat_count >= 2:
-            total += 1  # entire group bakes into 1 atlas material
+        if enabled >= 2:
+            total += 1
+            total += max(0, detected - enabled)
         else:
-            total += group.mat_count  # single-mat groups stay as-is
+            total += detected
     return total
 
 
 def _build_status_sentence(settings) -> str:
     """D-Shadow Inheritance Protocol: declarative sentence for Zone 1."""
-    groups = [g for g in settings.atlas_groups if g.enabled and g.mat_count >= 2]
+    groups = [
+        g for g in settings.atlas_groups
+        if g.enabled and _group_enabled_material_count(g) >= 2
+    ]
     total_before = settings.total_mats_before
     total_after = _projected_mat_count(settings)
     rank_after = _get_rank(total_after)
@@ -328,7 +1029,7 @@ def _build_status_sentence(settings) -> str:
                 shape_key_note = " and shape keys"
                 break
 
-    enabled_mats = sum(g.mat_count for g in groups)
+    enabled_mats = sum(_group_enabled_material_count(g) for g in groups)
     return (
         f"{enabled_mats} materials across {len(groups)} groups — "
         f"estimated {rank_after} atlas — "
@@ -362,11 +1063,66 @@ class BF_AtlasMeshItem(PropertyGroup):
     has_high_emission: BoolProperty(name="Emission > 1.0", default=False)
 
 
+class BF_AtlasMaterialItem(PropertyGroup):
+    """Selectable material source row inside an atlas group."""
+    enabled: BoolProperty(name="Include", default=True)
+    object_name: StringProperty(name="Object")
+    slot_index: IntProperty(name="Slot", default=0)
+    material_name: StringProperty(name="Material")
+    render_type: StringProperty(name="Render Type", default="Opaque")
+    texture_count: IntProperty(name="Texture Count", default=0)
+    has_no_images: BoolProperty(name="No Images", default=False)
+    has_missing_image: BoolProperty(name="Missing Image", default=False)
+    has_mixed_colorspace: BoolProperty(name="Mixed Color Space", default=False)
+    diagnostic_status: StringProperty(name="Diagnostic Status", default="")
+    diagnostic_warnings: StringProperty(name="Warnings", default="")
+    duplicate_group: StringProperty(name="Duplicate Group", default="")
+    size_override: BoolProperty(name="Override Size", default=False)
+    size_preset: EnumProperty(
+        name="Size",
+        items=_SIZE_PRESET_ITEMS,
+        default="SOURCE",
+    )
+    target_width: IntProperty(name="Width", default=1024, min=16, max=8192)
+    target_height: IntProperty(name="Height", default=1024, min=16, max=8192)
+    fallback_size: IntProperty(name="Fallback", default=512, min=16, max=8192)
+
+
+class BF_AtlasTextureItem(PropertyGroup):
+    """Selectable image texture source row inside an atlas group."""
+    enabled: BoolProperty(name="Include", default=True)
+    object_name: StringProperty(name="Object")
+    slot_index: IntProperty(name="Slot", default=0)
+    material_name: StringProperty(name="Material")
+    node_name: StringProperty(name="Node")
+    image_name: StringProperty(name="Image")
+    image_path: StringProperty(name="Path")
+    width: IntProperty(name="Width", default=0)
+    height: IntProperty(name="Height", default=0)
+    colorspace: StringProperty(name="Color Space")
+    packed: BoolProperty(name="Packed", default=False)
+    missing: BoolProperty(name="Missing", default=False)
+    role: EnumProperty(
+        name="Role",
+        items=_TEXTURE_ROLE_ITEMS,
+        default=ROLE_UNKNOWN,
+    )
+    role_label: StringProperty(name="Role Label", default="")
+    expected_colorspace: StringProperty(name="Expected Color Space", default="")
+    diagnostic_status: StringProperty(name="Diagnostic Status", default="")
+    diagnostic_warnings: StringProperty(name="Warnings", default="")
+    duplicate_group: StringProperty(name="Duplicate Group", default="")
+
+
 class BF_AtlasGroup(PropertyGroup):
     """One atlas group (bakes into a single texture atlas)."""
     name: StringProperty(name="Group Name", default="Group")
     enabled: BoolProperty(name="Enabled", default=True)
     meshes: CollectionProperty(type=BF_AtlasMeshItem)
+    materials: CollectionProperty(type=BF_AtlasMaterialItem)
+    textures: CollectionProperty(type=BF_AtlasTextureItem)
+    active_material_index: IntProperty(name="Active Material", default=0)
+    active_texture_index: IntProperty(name="Active Texture", default=0)
     render_type: StringProperty(name="Render Type", default="Opaque")
     resolution: EnumProperty(
         name="Resolution",
@@ -381,6 +1137,9 @@ class BF_AtlasGroup(PropertyGroup):
     has_warnings: BoolProperty(name="Has Warnings", default=False)
     warn_overlap: BoolProperty(name="UV Overlap Warning", default=False)
     warn_emission: BoolProperty(name="High Emission Warning", default=False)
+    quality_summary: StringProperty(name="Quality Summary", default="")
+    duplicate_count: IntProperty(name="Duplicate Count", default=0)
+    unknown_texture_roles: IntProperty(name="Unknown Texture Roles", default=0)
 
 
 class BF_AtlasSettings(PropertyGroup):
@@ -421,6 +1180,44 @@ class BF_AtlasSettings(PropertyGroup):
         description="Build a copyable report of source meshes, material slots, texture images, UV state, image sizes, and color spaces",
         default=True,
     )
+    color_fallback_size: IntProperty(
+        name="Color Fallback Size",
+        description="Atlas allocation size used for color-only materials with no image textures",
+        default=512,
+        min=16,
+        max=8192,
+    )
+    packing_preset: EnumProperty(
+        name="Packing Preset",
+        description="Quality preset for atlas padding and bleed behavior",
+        items=_PACKING_PRESET_ITEMS,
+        default="SAFE_DEFAULT",
+    )
+    atlas_padding_pixels: IntProperty(
+        name="Bake Padding",
+        description="Pixel margin used by Blender's bake operation",
+        default=4,
+        min=0,
+        max=128,
+    )
+    pixel_art_no_bleed: BoolProperty(
+        name="Pixel Art No-Bleed",
+        description="Keep padding conservative for crisp nearest-neighbor textures",
+        default=False,
+    )
+    preserve_island_orientation: BoolProperty(
+        name="Preserve Island Orientation",
+        description="Prefer UV methods that avoid unnecessary island rotation where supported",
+        default=True,
+    )
+    keep_source_uv_maps: BoolProperty(
+        name="Keep Source UV Maps",
+        description=(
+            "Keep UVMap_pre_atlas on the output mesh. Off by default so "
+            "atlas_uv becomes UV0 for FBX/Unity/VRChat export"
+        ),
+        default=False,
+    )
 
     # Advanced options
     preserve_originals: BoolProperty(
@@ -444,27 +1241,57 @@ class BF_AtlasSettings(PropertyGroup):
         precision=3,
     )
     pack_method: EnumProperty(
-        name="Pack Method",
-        items=[
-            ("BEST_FIT", "Best Fit", "Slower — packs islands as efficiently as possible"),
-            ("GRID", "Grid", "Faster — predictable grid layout, wastes some space"),
-        ],
+        name="UV Method",
+        description="How the atlas work mesh is unwrapped and packed before baking",
+        items=atlas_uv_method_items(include_advanced=True),
         default="BEST_FIT",
+    )
+    uv_random_seed: IntProperty(
+        name="UV Seed",
+        description="Deterministic seed used by seeded UV variation methods",
+        default=1337,
+        min=0,
+        max=999999,
+    )
+    uv_rotation_step: EnumProperty(
+        name="Rotation Step",
+        description="B4Artists advanced control for seeded atlas island rotation",
+        items=[
+            ("90", "90 deg", "Stable right-angle variation"),
+            ("45", "45 deg", "More varied diagonal rotations"),
+            ("180", "180 deg", "Flip-only variation"),
+        ],
+        default="90",
     )
     bake_albedo: BoolProperty(name="Albedo (Color)", default=True)
     bake_normal: BoolProperty(
         name="Normal Map",
-        description="Reserved for a future multi-pass atlas bake. The current combiner bakes albedo/color only",
+        description="Bake a separate normal atlas using the host bake engine",
         default=False,
     )
     bake_emission: BoolProperty(
         name="Emission",
-        description="Reserved for a future multi-pass atlas bake. The current combiner bakes albedo/color only",
+        description="Bake a separate emission atlas when the material graph provides emission data",
+        default=False,
+    )
+    bake_metallic: BoolProperty(
+        name="Metallic",
+        description="Planned utility-map pass. Currently preflight-blocked unless channel packing can safely provide a fallback",
         default=False,
     )
     bake_roughness: BoolProperty(
-        name="Metallic / Roughness",
-        description="Reserved for a future multi-pass atlas bake. The current combiner bakes albedo/color only",
+        name="Roughness",
+        description="Bake a separate roughness atlas when the host bake engine supports the pass",
+        default=False,
+    )
+    channel_pack_orm: BoolProperty(
+        name="Pack ORM Channels",
+        description="Opt-in channel packing: R=Metallic, G=Roughness, B=AO/black, A=Alpha/opaque",
+        default=False,
+    )
+    allow_unknown_channel_pack_roles: BoolProperty(
+        name="Allow Unknown Roles",
+        description="Permit channel-packing preflight even when some enabled texture rows are still Unknown",
         default=False,
     )
     output_format: EnumProperty(
@@ -529,6 +1356,61 @@ class BF_UL_VRC_AtlasGroups(UIList):
 # ─────────────────────────────────────────────────────────────────
 # Operators
 # ─────────────────────────────────────────────────────────────────
+
+class BF_UL_VRC_AtlasMaterials(UIList):
+    """Displays selectable material slots found during Analyze."""
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        row.prop(
+            item,
+            "enabled",
+            text="",
+            emboss=False,
+            icon="CHECKBOX_HLT" if item.enabled else "CHECKBOX_DEHLT",
+        )
+        sub = row.row(align=True)
+        sub.enabled = item.enabled
+        warn_icon = "MATERIAL_DATA"
+        if item.diagnostic_status == "unsupported_shader" or item.has_missing_image:
+            warn_icon = "ERROR"
+        elif item.diagnostic_warnings or item.duplicate_group or item.has_no_images or item.has_mixed_colorspace:
+            warn_icon = "INFO"
+        label = f"{item.object_name}[{item.slot_index}]  {item.material_name}"
+        sub.label(text=label, icon=warn_icon)
+        sub.label(text=item.render_type)
+        sub.label(text=f"{item.texture_count} tex")
+        if item.duplicate_group:
+            sub.label(text=item.duplicate_group)
+
+
+class BF_UL_VRC_AtlasTextures(UIList):
+    """Displays selectable texture image nodes found during Analyze."""
+
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        row.prop(
+            item,
+            "enabled",
+            text="",
+            emboss=False,
+            icon="CHECKBOX_HLT" if item.enabled else "CHECKBOX_DEHLT",
+        )
+        sub = row.row(align=True)
+        sub.enabled = item.enabled and not item.missing
+        image_icon = "ERROR" if item.missing else "IMAGE_DATA"
+        if not item.missing and item.diagnostic_warnings:
+            image_icon = "INFO"
+        size = f"{item.width}x{item.height}" if item.width and item.height else "missing"
+        packed = "packed" if item.packed else "external"
+        label = f"{item.material_name} / {item.node_name}: {item.image_name}"
+        sub.label(text=label, icon=image_icon)
+        sub.label(text=role_label(item.role))
+        sub.label(text=size)
+        sub.label(text=item.colorspace or packed)
+        if item.duplicate_group:
+            sub.label(text=item.duplicate_group)
+
 
 class BF_OT_VRC_AtlasAnalyze(Operator):
     """Analyze scene materials and auto-group by render type"""
@@ -600,6 +1482,7 @@ class BF_OT_VRC_AtlasAnalyze(Operator):
                 or has_overlap
                 or has_high_em
             )
+            _populate_group_sources(group, objs)
 
         _store_debug_report(context, meshes, settings)
         projected = _projected_mat_count(settings)
@@ -716,35 +1599,64 @@ class BF_OT_VRC_AtlasBake(Operator):
         lines_stable = []
         errors = []
 
-        arm = active_armature(context)
         bake_groups = []
 
         if settings.has_backup:
             errors.append("Accept or Revert the current atlas result before baking another atlas.")
 
         if not settings.bake_albedo:
-            errors.append("Albedo (Color) must be enabled. Multi-pass texture atlasing is not implemented yet.")
-        unsupported_passes = []
-        if settings.bake_normal:
-            unsupported_passes.append("Normal Map")
-        if settings.bake_emission:
-            unsupported_passes.append("Emission")
-        if settings.bake_roughness:
-            unsupported_passes.append("Metallic / Roughness")
-        if unsupported_passes:
+            errors.append("Albedo (Color) must stay enabled so the atlas material has a base texture.")
+
+        enabled_passes = _settings_enabled_passes(settings)
+        all_texture_sources = []
+        for group in settings.atlas_groups:
+            all_texture_sources.extend(_group_texture_quality_sources(group))
+        pass_plan = build_multipass_output_plan(
+            enabled_passes,
+            all_texture_sources,
+            base_name="atlas",
+            allow_unknown_roles=True,
+        )
+        for output in pass_plan["outputs"]:
+            if output["role"] != ROLE_ALBEDO:
+                lines_change.append(
+                    f"  Extra output planned: {output['image_name']} ({output['label']})"
+                )
+        for skipped in pass_plan["skipped"]:
+            lines_skip.append(
+                f"  {skipped['reason']}; the pass will produce fallback bake data if selected"
+            )
+        if getattr(settings, "bake_metallic", False):
             errors.append(
-                "Unsupported bake pass selected: "
-                + ", ".join(unsupported_passes)
-                + ". Current atlas bake supports albedo/color only."
+                "Metallic atlas pass is not enabled yet: Blender has no direct metallic bake pass in this pipeline. "
+                "Leave Metallic off until source-map channel packing is verified."
+            )
+        if getattr(settings, "channel_pack_orm", False):
+            channel_plan = build_channel_pack_plan(
+                all_texture_sources,
+                allow_unknown_roles=getattr(settings, "allow_unknown_channel_pack_roles", False),
+            )
+            for channel, spec in CHANNEL_PACK_CONVENTION.items():
+                lines_skip.append(
+                    f"  ORM {channel}: {spec['label']} "
+                    f"(fallback {channel_plan['channels'][channel]['fallback']})"
+                )
+            if channel_plan["errors"]:
+                errors.extend(channel_plan["errors"])
+            errors.append(
+                "ORM channel packing is preflight-only in this build until the metallic source path is host-verified."
             )
 
         for group in settings.atlas_groups:
             if not group.enabled:
                 lines_skip.append(f"  {group.name} — disabled by user")
                 continue
-            if group.mat_count < 2:
+            enabled_mats = _group_enabled_material_count(group)
+            detected_mats = _group_detected_material_count(group)
+            disabled_mats = max(0, detected_mats - enabled_mats)
+            if enabled_mats < 2:
                 lines_skip.append(
-                    f"  {group.name} — only {group.mat_count} material "
+                    f"  {group.name} — only {enabled_mats} material "
                     f"(single-material groups have no effect)"
                 )
                 continue
@@ -753,14 +1665,50 @@ class BF_OT_VRC_AtlasBake(Operator):
             res = group.resolution
             vram = _vram_mb(res)
             lines_proceed.append(
-                f"  {group.name}: {group.mat_count} materials → "
+                f"  {group.name}: {enabled_mats} of {detected_mats} materials → "
                 f"atlas_{group.render_type.lower().replace(' ', '_')}_{res}px "
                 f"({vram} MB VRAM)"
             )
+            if disabled_mats:
+                lines_skip.append(
+                    f"    [i] {group.name}: {disabled_mats} material(s) excluded and kept separate"
+                )
+            disabled_textures = (
+                len(group.textures) - _group_enabled_texture_count(group)
+                if hasattr(group, "textures") else 0
+            )
+            if disabled_textures > 0:
+                lines_skip.append(
+                    f"    [i] {group.name}: {disabled_textures} texture image(s) excluded from the bake"
+                )
+            if getattr(group, "quality_summary", ""):
+                lines_skip.append(f"    [i] {group.name}: {group.quality_summary}")
+            for material_item in getattr(group, "materials", []):
+                if not material_item.enabled:
+                    continue
+                if material_item.size_override or material_item.has_no_images:
+                    source_width, source_height = _material_source_size(group, material_item)
+                    size_plan = resolve_size_preset(
+                        material_item.size_preset if material_item.size_override else "SOURCE",
+                        source_width=source_width,
+                        source_height=source_height,
+                        custom_width=material_item.target_width,
+                        custom_height=material_item.target_height,
+                        fallback_size=material_item.fallback_size or settings.color_fallback_size,
+                    )
+                    if not size_plan["valid"]:
+                        errors.append(
+                            f"{material_item.material_name}: invalid texture size "
+                            f"{size_plan['width']}x{size_plan['height']}"
+                        )
+                    lines_skip.append(
+                        f"    [i] {material_item.material_name}: size plan "
+                        f"{size_plan['width']}x{size_plan['height']} ({size_plan['preset']})"
+                    )
             if group.warn_overlap:
                 lines_skip.append(
                     f"    [!] {group.name} — overlapping UVs detected. "
-                    f"Atlas UV will be repacked (Smart UV Project)"
+                    f"Atlas UV will be repacked ({get_uv_method_label(settings.pack_method)})"
                 )
             if group.warn_emission and settings.output_format != "EXR":
                 lines_skip.append(
@@ -772,12 +1720,34 @@ class BF_OT_VRC_AtlasBake(Operator):
         if not bake_groups:
             errors.append("No groups with 2+ materials are enabled. Nothing to bake.")
 
+        if settings.keep_source_uv_maps:
+            lines_change.append(
+                "  UV maps repacked; source UV maps kept by advanced setting"
+            )
+            lines_skip.append(
+                "    [!] Kept source UV maps can export atlas_uv as UV1 in FBX/Unity"
+            )
+        else:
+            lines_change.append(
+                "  Export UV set: atlas_uv becomes UV0; source UV maps removed from atlas mesh"
+            )
         lines_change.append(
-            f"  UV maps repacked (originals preserved as 'UVMap_pre_atlas')"
+            "  Source textures forced to sample original UVs during bake"
+        )
+        lines_change.append(
+            "  Atlas mesh validated before originals are hidden"
+        )
+        packing = packing_preset_settings(settings.packing_preset)
+        lines_change.append(
+            f"  Packing preset: {packing['label']} "
+            f"(padding {settings.atlas_padding_pixels}px, margin {settings.uv_margin})"
         )
         after = sum(1 for g in bake_groups) + sum(
-            g.mat_count for g in settings.atlas_groups
-            if not g.enabled or g.mat_count < 2
+            _group_detected_material_count(g) for g in settings.atlas_groups
+            if not g.enabled or _group_enabled_material_count(g) < 2
+        ) + sum(
+            max(0, _group_detected_material_count(g) - _group_enabled_material_count(g))
+            for g in bake_groups
         )
         lines_change.append(
             f"  Material slots: {settings.total_mats_before} → ~{after}"
@@ -893,7 +1863,7 @@ class BF_OT_VRC_AtlasBake(Operator):
                 result = self._bake_group(context, group, settings)
                 if result:
                     results.append(result)
-                    mats_after_count -= (group.mat_count - 1)
+                    mats_after_count -= (_group_enabled_material_count(group) - 1)
 
             wm.progress_end()
 
@@ -919,6 +1889,7 @@ class BF_OT_VRC_AtlasBake(Operator):
                     "scope": settings.target_scope,
                     "format": settings.output_format,
                     "output_path": settings.output_path,
+                    "uv_method": settings.pack_method,
                 },
             )
             pipeline.set_phase_complete(context.scene, "material_atlas", pipeline.OUTCOME_CHANGED)
@@ -926,6 +1897,7 @@ class BF_OT_VRC_AtlasBake(Operator):
 
         except Exception as e:
             wm.progress_end()
+            _cleanup_transient_atlas_objects()
             logger.exception("[BoneForge Atlas] Bake failed")
             self.report({"ERROR"}, f"Atlas bake failed: {e}")
             pipeline.append_ledger(
@@ -1000,12 +1972,15 @@ class BF_OT_VRC_AtlasBake(Operator):
         res = int(group.resolution)
         arm = active_armature(context)
         scene = context.scene
+        enabled_slots_by_obj = _enabled_slots_by_object(group)
+        detected_slots_by_obj = _detected_slots_by_object(group)
+        enabled_texture_keys = _enabled_texture_keys(group)
 
         # Collect source objects
         source_objs = []
         for item in group.meshes:
             obj = bpy.data.objects.get(item.object_name)
-            if obj and obj.type == "MESH":
+            if obj and obj.type == "MESH" and enabled_slots_by_obj.get(obj.name):
                 source_objs.append(obj)
 
         if not source_objs:
@@ -1013,18 +1988,55 @@ class BF_OT_VRC_AtlasBake(Operator):
         source_names = [obj.name for obj in source_objs]
 
         # ── Create working duplicates ──────────────────────────
-        bpy.ops.object.select_all(action="DESELECT")
+        _ensure_object_mode(context, "Prepare atlas bake")
+        _deselect_all_objects_directly(context.view_layer)
         work_objs = []
+        keep_objs = []
         for obj in source_objs:
+            detected_slots = detected_slots_by_obj.get(obj.name, set(range(len(obj.data.materials))))
+            enabled_slots = enabled_slots_by_obj.get(obj.name, set())
+            disabled_slots = set(detected_slots) - set(enabled_slots)
+
+            if disabled_slots:
+                keep = obj.copy()
+                keep.data = obj.data.copy()
+                _copy_material_slots(keep.data)
+                keep.name = f"ATLAS_KEEP_{obj.name}"
+                scene.collection.objects.link(keep)
+                if not _remove_faces_by_material_slots(keep, set(enabled_slots)):
+                    bpy.data.objects.remove(keep, do_unlink=True)
+                else:
+                    if arm:
+                        keep.parent = arm
+                    keep["boneforge_atlas_excluded_materials"] = json.dumps(sorted(disabled_slots))
+                    keep_objs.append(keep)
+
             dup = obj.copy()
             dup.data = obj.data.copy()
+            _copy_material_slots(dup.data)
+            if not _remove_faces_by_material_slots(dup, disabled_slots):
+                bpy.data.objects.remove(dup, do_unlink=True)
+                continue
             for mat_index, mat in enumerate(dup.data.materials):
                 if mat is not None:
-                    dup.data.materials[mat_index] = mat.copy()
+                    original_mat = obj.data.materials[mat_index] if mat_index < len(obj.data.materials) else mat
+                    original_name = original_mat.name if original_mat else mat.name
+                    _disconnect_disabled_texture_nodes(
+                        mat,
+                        obj.name,
+                        mat_index,
+                        original_name,
+                        enabled_texture_keys,
+                    )
             dup.name = f"__BF_ATLAS_WORK_{obj.name}"
             scene.collection.objects.link(dup)
             dup.select_set(True)
             work_objs.append(dup)
+
+        if not work_objs:
+            for keep in keep_objs:
+                bpy.data.objects.remove(keep, do_unlink=True)
+            return None
 
         # ── Preserve original UV map ──────────────────────────
         for obj in work_objs:
@@ -1035,14 +2047,21 @@ class BF_OT_VRC_AtlasBake(Operator):
                     original_uv.name = "UVMap_pre_atlas"
 
         # ── Join into one working mesh ────────────────────────
-        if context.object and context.object.mode != 'OBJECT':
-            bpy.ops.object.mode_set(mode='OBJECT')
+        _ensure_object_mode(context, "Prepare atlas join")
+        _deselect_all_objects_directly(context.view_layer)
+        for obj in work_objs:
+            obj.select_set(True)
         context.view_layer.objects.active = work_objs[0]
         try:
-            bpy.ops.object.join()
+            if len(work_objs) > 1:
+                _run_with_view3d_context(context, bpy.ops.object.join, "Join atlas work meshes")
         except Exception as join_err:
             for w in work_objs:
-                bpy.data.objects.remove(w, do_unlink=True)
+                if w.name in bpy.data.objects:
+                    bpy.data.objects.remove(w, do_unlink=True)
+            for keep in keep_objs:
+                if keep.name in bpy.data.objects:
+                    bpy.data.objects.remove(keep, do_unlink=True)
             raise RuntimeError(f"Join failed — work objects cleaned up: {join_err}")
         joined = context.view_layer.objects.active
         joined.name = f"__BF_ATLAS_{group.render_type.replace(' ', '_')}"
@@ -1053,19 +2072,17 @@ class BF_OT_VRC_AtlasBake(Operator):
             mesh.uv_layers.remove(mesh.uv_layers["atlas_uv"])
         atlas_uv = mesh.uv_layers.new(name="atlas_uv")
 
-        # Set pre_atlas as render-active, atlas_uv as active for bake target
+        # Bake into atlas_uv; copied source image nodes read UVMap_pre_atlas explicitly.
         for uv in mesh.uv_layers:
-            uv.active_render = (uv.name == "UVMap_pre_atlas")
+            uv.active_render = (uv.name == "atlas_uv")
         atlas_uv.active = True
+        atlas_uv.active_render = True
 
         # ── Smart UV Project → Pack Islands ───────────────────
-        bpy.ops.object.mode_set(mode="EDIT")
-        try:
-            bpy.ops.mesh.select_all(action="SELECT")
-            bpy.ops.uv.smart_project(angle_limit=66.0, island_margin=settings.uv_margin)
-            bpy.ops.uv.pack_islands(margin=settings.uv_margin)
-        finally:
-            bpy.ops.object.mode_set(mode="OBJECT")
+        uv_result = apply_atlas_uv_method(context, joined, settings, _run_with_view3d_context)
+        joined["boneforge_atlas_uv_method"] = uv_result["method"]
+        joined["boneforge_atlas_uv_result"] = summarize_atlas_uv_result(uv_result)
+        logger.info("[BoneForge Atlas] %s", joined["boneforge_atlas_uv_result"])
 
         # ── Create atlas image ────────────────────────────────
         atlas_name = (
@@ -1075,12 +2092,15 @@ class BF_OT_VRC_AtlasBake(Operator):
             bpy.data.images.remove(bpy.data.images[atlas_name])
         atlas_img = bpy.data.images.new(atlas_name, width=res, height=res, alpha=True)
         atlas_img.colorspace_settings.name = "sRGB"
+        extra_images = {}
 
         # ── Add Image Texture node to each material ───────────
+        source_uv_routes = 0
         for mat in joined.data.materials:
             if not mat or not mat.use_nodes:
                 continue
             nodes = mat.node_tree.nodes
+            source_uv_routes += _route_source_image_nodes_to_uv(mat, "UVMap_pre_atlas")
             # Remove any existing BF target node
             old = nodes.get("BF_ATLAS_TARGET")
             if old:
@@ -1098,20 +2118,65 @@ class BF_OT_VRC_AtlasBake(Operator):
         # ── Bake DIFFUSE ──────────────────────────────────────
         saved_engine = scene.render.engine
         scene.render.engine = "CYCLES"
+        enabled_passes = set(_settings_enabled_passes(settings))
 
         try:
-            bpy.ops.object.bake(
+            context.view_layer.objects.active = joined
+            _deselect_all_objects_directly(context.view_layer)
+            joined.select_set(True)
+            _run_with_view3d_context(
+                context,
+                bpy.ops.object.bake,
+                "Bake atlas texture",
                 type="DIFFUSE",
                 pass_filter={"COLOR"},
                 use_selected_to_active=False,
-                margin=4,
+                margin=settings.atlas_padding_pixels,
                 use_clear=True,
             )
+            for role, spec in _EXTRA_BAKE_PASSES.items():
+                if role not in enabled_passes:
+                    continue
+                pass_name = f"{atlas_name}{spec['suffix']}"
+                if pass_name in bpy.data.images:
+                    bpy.data.images.remove(bpy.data.images[pass_name])
+                pass_img = bpy.data.images.new(pass_name, width=res, height=res, alpha=True)
+                pass_img.colorspace_settings.name = spec["colorspace"]
+                for mat in joined.data.materials:
+                    if not mat or not mat.use_nodes:
+                        continue
+                    nodes = mat.node_tree.nodes
+                    target = nodes.get("BF_ATLAS_TARGET")
+                    if target is None:
+                        continue
+                    target.image = pass_img
+                    for node in nodes:
+                        node.select = False
+                    target.select = True
+                    nodes.active = target
+                _run_with_view3d_context(
+                    context,
+                    bpy.ops.object.bake,
+                    f"Bake {role_label(role)} atlas",
+                    type=spec["type"],
+                    use_selected_to_active=False,
+                    margin=settings.atlas_padding_pixels,
+                    use_clear=True,
+                )
+                extra_images[role] = pass_img
+            for mat in joined.data.materials:
+                if mat and mat.use_nodes and mat.node_tree:
+                    target = mat.node_tree.nodes.get("BF_ATLAS_TARGET")
+                    if target is not None:
+                        target.image = atlas_img
         except Exception as bake_err:
             scene.render.engine = saved_engine
             logger.warning("[BoneForge Atlas] Cycles bake failed for %s: %s", group.name, bake_err)
             raise
         scene.render.engine = saved_engine
+
+        keep_source_uv_maps = getattr(settings, "keep_source_uv_maps", False)
+        _prepare_atlas_uv_for_export(joined.data, keep_source_uv_maps)
 
         # ── Save atlas image ──────────────────────────────────
         out_dir = bpy.path.abspath(settings.output_path)
@@ -1131,6 +2196,17 @@ class BF_OT_VRC_AtlasBake(Operator):
                 atlas_img.save()
             except Exception as save_err:
                 logger.warning(f"[BoneForge Atlas] Could not save image: {save_err}")
+            for role, image in extra_images.items():
+                image.filepath_raw = os.path.join(out_dir, image.name + ext)
+                image.file_format = settings.output_format
+                try:
+                    image.save()
+                except Exception as save_err:
+                    logger.warning(
+                        "[BoneForge Atlas] Could not save %s atlas: %s",
+                        role_label(role),
+                        save_err,
+                    )
 
         # ── Build atlas material ──────────────────────────────
         mat_name = f"M_{atlas_name}"
@@ -1162,13 +2238,44 @@ class BF_OT_VRC_AtlasBake(Operator):
         uv_node.location = (-550, 0)
         links.new(uv_node.outputs["UV"], tex_node.inputs["Vector"])
         links.new(tex_node.outputs["Color"], bsdf_node.inputs["Base Color"])
+        if ROLE_NORMAL in extra_images:
+            normal_tex = nodes.new("ShaderNodeTexImage")
+            normal_tex.name = "Atlas Normal"
+            normal_tex.image = extra_images[ROLE_NORMAL]
+            normal_tex.location = (-300, -250)
+            normal_map = nodes.new("ShaderNodeNormalMap")
+            normal_map.location = (0, -250)
+            links.new(uv_node.outputs["UV"], normal_tex.inputs["Vector"])
+            links.new(normal_tex.outputs["Color"], normal_map.inputs["Color"])
+            links.new(normal_map.outputs["Normal"], bsdf_node.inputs["Normal"])
+        if ROLE_EMISSION in extra_images:
+            emission_tex = nodes.new("ShaderNodeTexImage")
+            emission_tex.name = "Atlas Emission"
+            emission_tex.image = extra_images[ROLE_EMISSION]
+            emission_tex.location = (-300, -500)
+            links.new(uv_node.outputs["UV"], emission_tex.inputs["Vector"])
+            emission_input = bsdf_node.inputs.get("Emission Color") or bsdf_node.inputs.get("Emission")
+            emission_strength = bsdf_node.inputs.get("Emission Strength")
+            if emission_input is not None:
+                links.new(emission_tex.outputs["Color"], emission_input)
+            if emission_strength is not None and hasattr(emission_strength, "default_value"):
+                emission_strength.default_value = 1.0
+        if ROLE_ROUGHNESS in extra_images:
+            roughness_tex = nodes.new("ShaderNodeTexImage")
+            roughness_tex.name = "Atlas Roughness"
+            roughness_tex.image = extra_images[ROLE_ROUGHNESS]
+            roughness_tex.location = (-300, -750)
+            links.new(uv_node.outputs["UV"], roughness_tex.inputs["Vector"])
+            roughness_input = bsdf_node.inputs.get("Roughness")
+            if roughness_input is not None:
+                links.new(roughness_tex.outputs["Color"], roughness_input)
         links.new(bsdf_node.outputs["BSDF"], output_node.inputs["Surface"])
         if group.render_type in ("Alpha Blend", "Alpha Clip"):
             links.new(tex_node.outputs["Alpha"], bsdf_node.inputs["Alpha"])
 
         # ── Assign atlas material to joined mesh ──────────────
-        joined.data.materials.clear()
-        joined.data.materials.append(atlas_mat)
+        _assign_single_atlas_material(joined.data, atlas_mat)
+        _validate_atlas_mesh(joined, atlas_mat)
 
         # ── Reparent to armature if present ──────────────────
         if arm:
@@ -1192,6 +2299,16 @@ class BF_OT_VRC_AtlasBake(Operator):
         )
         joined["boneforge_atlas_backup"] = settings.backup_collection_name
         joined["boneforge_atlas_sources"] = json.dumps(source_names)
+        joined["boneforge_atlas_source_uv_routes"] = source_uv_routes
+        joined["boneforge_atlas_uv0"] = "atlas_uv"
+        joined["boneforge_atlas_source_uv_maps_kept"] = bool(keep_source_uv_maps)
+        joined["boneforge_atlas_outputs"] = json.dumps(
+            {role: image.name for role, image in extra_images.items()}
+        )
+        for keep in keep_objs:
+            keep.name = keep.name.replace("ATLAS_KEEP_", "KEPT_", 1)
+            keep["boneforge_atlas_backup"] = settings.backup_collection_name
+            keep["boneforge_atlas_source_group"] = group.name
 
         return joined.name
 
@@ -1395,7 +2512,7 @@ class BONEFORGE_PT_vrc_w2_atlas(Panel):
 
                 if active_group.warn_overlap:
                     dcol.label(
-                        text=T("[!] Overlapping UVs detected — atlas_uv will use Smart UV Project"),
+                        text=T("[!] Overlapping UVs detected - atlas_uv will use the selected UV method"),
                         icon="ERROR",
                     )
                     dcol.label(
@@ -1426,7 +2543,7 @@ class BONEFORGE_PT_vrc_w2_atlas(Panel):
                 if not active_group.warn_overlap and not active_group.warn_emission and \
                         active_group.render_type not in ("Alpha Blend", "Emissive"):
                     dcol.label(
-                        text=f"{active_group.mat_count} materials → 1 atlas at {active_group.resolution}px",
+                        text=f"{_group_enabled_material_count(active_group)} materials → 1 atlas at {active_group.resolution}px",
                         icon="CHECKMARK",
                     )
 
@@ -1445,6 +2562,68 @@ class BONEFORGE_PT_vrc_w2_atlas(Panel):
                             mesh_row.label(text=T("[SK]"))
                         if item.has_overlapping_uvs:
                             mesh_row.label(text=T("[UV!]"))
+
+                if active_group.materials:
+                    dcol.separator()
+                    enabled_mats = _group_enabled_material_count(active_group)
+                    dcol.label(
+                        text=T(
+                            f"Materials to combine: {enabled_mats}/{len(active_group.materials)}"
+                        ),
+                        icon="MATERIAL_DATA",
+                    )
+                    dcol.template_list(
+                        "BF_UL_VRC_AtlasMaterials", "",
+                        active_group, "materials",
+                        active_group, "active_material_index",
+                        rows=5,
+                    )
+                    mat_idx = active_group.active_material_index
+                    if 0 <= mat_idx < len(active_group.materials):
+                        mat_item = active_group.materials[mat_idx]
+                        mat_detail = dcol.box()
+                        mat_detail.label(text=T("Selected Material:"), icon="MATERIAL_DATA")
+                        mat_detail.label(text=mat_item.diagnostic_status or "supported")
+                        if mat_item.diagnostic_warnings:
+                            mat_detail.label(text=mat_item.diagnostic_warnings, icon="INFO")
+                        if mat_item.duplicate_group:
+                            mat_detail.label(text=f"Duplicate/shared group: {mat_item.duplicate_group}", icon="COPYDOWN")
+                        size_row = mat_detail.row(align=True)
+                        size_row.prop(mat_item, "size_override")
+                        size_row.prop(mat_item, "size_preset", text="")
+                        if mat_item.size_override and mat_item.size_preset == "CUSTOM":
+                            custom_row = mat_detail.row(align=True)
+                            custom_row.prop(mat_item, "target_width")
+                            custom_row.prop(mat_item, "target_height")
+                        if mat_item.has_no_images:
+                            mat_detail.prop(mat_item, "fallback_size")
+
+                if active_group.textures:
+                    dcol.separator()
+                    enabled_tex = _group_enabled_texture_count(active_group)
+                    dcol.label(
+                        text=T(
+                            f"Texture images: {enabled_tex}/{len(active_group.textures)}"
+                        ),
+                        icon="IMAGE_DATA",
+                    )
+                    dcol.template_list(
+                        "BF_UL_VRC_AtlasTextures", "",
+                        active_group, "textures",
+                        active_group, "active_texture_index",
+                        rows=5,
+                    )
+                    tex_idx = active_group.active_texture_index
+                    if 0 <= tex_idx < len(active_group.textures):
+                        tex_item = active_group.textures[tex_idx]
+                        tex_detail = dcol.box()
+                        tex_detail.label(text=T("Selected Texture:"), icon="IMAGE_DATA")
+                        tex_detail.prop(tex_item, "role")
+                        tex_detail.label(text=f"Expected: {role_color_space(tex_item.role)}")
+                        if tex_item.diagnostic_warnings:
+                            tex_detail.label(text=tex_item.diagnostic_warnings, icon="INFO")
+                        if tex_item.duplicate_group:
+                            tex_detail.label(text=f"Duplicate source group: {tex_item.duplicate_group}", icon="COPYDOWN")
 
             # Permanent transparency note (unanimous addition S)
             layout.separator()
@@ -1503,19 +2682,31 @@ class BONEFORGE_PT_vrc_w2_atlas(Panel):
             adv_col.prop(settings, "bake_normal")
             emission_row = adv_col.row()
             emission_row.prop(settings, "bake_emission")
+            adv_col.prop(settings, "bake_metallic")
             adv_col.prop(settings, "bake_roughness")
-            adv_col.label(
-                text=T("Only Albedo is active in this version."),
-                icon="INFO",
-            )
+            adv_col.prop(settings, "channel_pack_orm")
+            if settings.channel_pack_orm:
+                adv_col.prop(settings, "allow_unknown_channel_pack_roles")
+                adv_col.label(text=T("ORM is blocked until metallic packing is verified."), icon="INFO")
+            if settings.bake_metallic:
+                adv_col.label(text=T("Metallic pass is preflight-blocked in this build."), icon="ERROR")
 
             adv_col.separator()
             adv_col.label(text=T("UV Packing:"))
+            adv_col.prop(settings, "packing_preset")
             adv_col.prop(settings, "uv_margin")
+            adv_col.prop(settings, "atlas_padding_pixels")
+            adv_col.prop(settings, "pixel_art_no_bleed")
+            adv_col.prop(settings, "preserve_island_orientation")
+            adv_col.prop(settings, "keep_source_uv_maps")
             adv_col.prop(settings, "pack_method")
+            if method_uses_seed(settings.pack_method):
+                adv_col.prop(settings, "uv_random_seed")
+                adv_col.prop(settings, "uv_rotation_step")
 
             adv_col.separator()
             adv_col.label(text=T("Output:"))
+            adv_col.prop(settings, "color_fallback_size")
             adv_col.prop(settings, "output_format")
             if settings.output_format == "EXR":
                 adv_col.label(
@@ -1540,9 +2731,13 @@ class BONEFORGE_PT_vrc_w2_atlas(Panel):
 
 _classes = (
     BF_AtlasMeshItem,
+    BF_AtlasMaterialItem,
+    BF_AtlasTextureItem,
     BF_AtlasGroup,
     BF_AtlasSettings,
     BF_UL_VRC_AtlasGroups,
+    BF_UL_VRC_AtlasMaterials,
+    BF_UL_VRC_AtlasTextures,
     BF_OT_VRC_AtlasAnalyze,
     BF_OT_VRC_AtlasAddGroup,
     BF_OT_VRC_AtlasRemoveGroup,

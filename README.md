@@ -57,12 +57,12 @@ poll trick), so each package pays its cost only when you turn it on.
 
 The ready-to-install add-on lives in [`releases/`](releases/):
 
-- `BoneForge-BFA-8.4.0.zip`
+- `BoneForge-BFA-8.4.6.zip`
 
 To install in **Bforartists**:
 
 1. **Edit → Preferences → Add-ons → Install from Disk…**
-2. Pick `BoneForge-BFA-8.4.0.zip`.
+2. Pick `BoneForge-BFA-8.4.6.zip`.
 3. Enable the add-on by ticking its checkbox.
 4. Open the **N-panel** in the 3D Viewport — BoneForge adds a **Rig Builder**
    tab; Properties → Object Data gains a mirror panel for the active armature.
@@ -112,7 +112,7 @@ Manuals are in [`docs/`](docs/):
 
 - [`docs/BoneForge_Documentation.pdf`](docs/BoneForge_Documentation.pdf) — user manual (PDF)
 - [`docs/BoneForge_Documentation.md`](docs/BoneForge_Documentation.md) — same manual in Markdown
-- [`docs/BoneForge_BFA_Rigging_Suite.md`](docs/BoneForge_BFA_Rigging_Suite.md) — the 8.4.0 production rigging suite (engine, detection, face, control layer, retarget, export, picker)
+- [`docs/BoneForge_BFA_Rigging_Suite.md`](docs/BoneForge_BFA_Rigging_Suite.md) — the 8.4.x production rigging suite (engine, detection, face, control layer, retarget, export, picker)
 
 ## Requirements
 

@@ -78,7 +78,7 @@ class CATS_PT_pipeline_status(Panel):
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw_header(self, context):
-        self.layout.label(text=T("Pipeline Status"), icon='SEQUENCE_COLOR_04')
+        self.layout.label(text=T("Pipeline Status"), icon='STRIP_COLOR_04')
 
     @classmethod
     def poll(cls, context):
