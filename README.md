@@ -8,7 +8,7 @@ notice with a "Get Bforartists" button and nothing else.
 | | |
 |---|---|
 | **Tool** | BoneForge BFA |
-| **Version** | 8.4.0 |
+| **Version** | 8.4.6 |
 | **Host** | Bforartists 4.0+ (tested through 5.2) — **not** standard Blender |
 | **Category** | Rigging / Animation |
 | **License** | GPL v2.0 or later |
@@ -70,35 +70,29 @@ To install in **Bforartists**:
 You don't need to unzip anything by hand — Bforartists installs directly from
 the `.zip`.
 
-## Bforartists-only — how the lock works
+## B4Artists Exclusive Feature Set
 
-This build refuses to run in standard Blender. The host is detected by several
-independent signals; an unmodified standard Blender produces none of them:
+The B4Artists package is the exclusive build. The open Blender package remains
+the non-exclusive standard-Blender build focused on CATS, Material Combiner, and
+basic BoneForge/Mixamo-style avatar helpers.
 
-| Signal | Source |
-|---|---|
-| `bpy.app.bforartists_version` | Attribute compiled into Bforartists builds |
-| `bpy.app.binary_path` | Executable is `bforartists` / `bforartists.exe` |
-| `sys.executable` | Bundled Python lives in the Bforartists install dir |
-| `bpy.utils.resource_path()` | Bforartists' own `bforartists` config/resource tree |
-
-The check is enforced in depth across four layers, so removing or editing any
-single file is not enough to bypass it:
-
-1. **Entry gate** — `boneforge/__init__.py` verifies the host before anything
-   functional loads.
-2. **Core gate** — `boneforge/core/__init__.py` independently raises in standard
-   Blender.
-3. **Registry gate** — `boneforge/core/tool_registry.py` refuses to hand out the
-   tool registry, so no feature package can register or enable.
-4. **Timer re-verify** — the entry point re-checks the host ~20 s after startup
-   and every 10 minutes, swapping in the lockout notice if the check ever fails.
-
-In standard Blender, only a stub preferences notice + a "Get Bforartists" button
-are registered — no panels, operators, properties, or features. (As with any
-Python add-on, this is a strong deterrent, not DRM.) Details:
-[`boneforge/BFA_EXCLUSIVE.md`](boneforge/BFA_EXCLUSIVE.md). The lock is exercised
-by [`test_bfa_lock.py`](test_bfa_lock.py) (run `python3 test_bfa_lock.py`).
+| Area | Open Blender BoneForge | BoneForge B4Artists Exclusive |
+|---|---|---|
+| Host support | Standard Blender | Bforartists |
+| Repository | `Axleonex/BoneForge_ALTERNATIVE_CATS_for_5.0_Blender` | `Axleonex/BoneForge_B4Artists` |
+| Release zip | `BoneForge-8.4.6.zip` | `BoneForge-BFA-8.4.6.zip` |
+| CATS avatar cleanup | Included | Included |
+| Material Atlas Combiner | Included | Included |
+| Selectable materials and textures | Included | Included |
+| Atlas UV0 export default | Included | Included |
+| Basic BoneForge and Mixamo-style avatar helpers | Included | Included |
+| Production control-rig construction | Not included | Included |
+| Smart landmark / joint detection suite | Not included | Included |
+| Animator control layer | Not included | Included |
+| Control Picker / rig UI | Not included | Included |
+| Advanced retargeting core and source maps | Not included | Included |
+| Profile-driven game export | Not included | Included |
+| B4Artists-exclusive release gate | Not included | Included |
 
 ## Browse the source
 

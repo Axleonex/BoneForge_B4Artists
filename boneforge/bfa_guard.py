@@ -1,37 +1,8 @@
-"""BoneForge BFA — Bforartists environment guard.
+"""BoneForge BFA runtime validation.
 
-This build of BoneForge is **exclusive to Bforartists** and refuses to
-run inside standard Blender. The guard is multi-signal: any one of the
-following marks the host as Bforartists, and an unmodified standard
-Blender produces none of them.
-
-Detection signals
------------------
-``bpy.app.bforartists_version``  Attribute compiled into Bforartists
-                                 builds. Absent in standard Blender.
-``bpy.app.binary_path``          Bforartists ships as ``bforartists``
-                                 / ``bforartists.exe``.
-``sys.executable``               The bundled Python lives inside the
-                                 Bforartists install directory.
-``bpy.utils.resource_path``      Bforartists keeps its own config /
-                                 resource tree named ``bforartists``
-                                 (separate from Blender's).
-
-Lockout behaviour (standard Blender)
-------------------------------------
-``register_lockout()`` registers *only* a stub AddonPreferences box
-and a "Get Bforartists" button — no panels, operators, properties, or
-feature packages — plus a one-shot popup explaining the lock. Nothing
-functional ever loads.
-
-Defense in depth
-----------------
-This module is one layer of several. ``boneforge/__init__.py``,
-``boneforge/core/__init__.py`` and ``boneforge/core/tool_registry.py``
-each carry an *independent inline copy* of the detection logic, and
-the entry point re-verifies on a timer after startup. Bypassing the
-lock requires editing multiple files; editing or deleting this module
-alone is not enough.
+This build of BoneForge is exclusive to Bforartists. In other hosts it
+registers only an install guidance notice and does not load functional
+feature packages.
 """
 
 import logging
@@ -53,15 +24,10 @@ LOCK_LINES = (
 )
 
 
-# -- Detection ----------------------------------------------------------
+# -- Host validation ----------------------------------------------------
 
 def detection_signals():
-    """Return the list of Bforartists indicators found in this host.
-
-    Empty list == standard Blender (or any non-Bforartists host).
-    Every check is wrapped so an API difference can never raise out
-    of the guard itself.
-    """
+    """Return internal host-validation indicators for this process."""
     signals = []
     try:
         import bpy
@@ -121,7 +87,7 @@ def require_bforartists(caller="boneforge"):
         )
 
 
-# -- Lockout stub UI (the only thing registered in standard Blender) ----
+# -- Notice-only UI -----------------------------------------------------
 
 def _build_lockout_classes():
     """Create the stub classes lazily so this module can be imported
@@ -179,15 +145,14 @@ def _notify_locked():
 
 
 def register_lockout():
-    """Register the lockout stub. Called instead of the real add-on
-    when the host is not Bforartists."""
+    """Register the notice-only UI for unsupported hosts."""
     global _lockout_classes
     import bpy
 
     logger.error(
-        "[BoneForge BFA] Host is not Bforartists — locking out. "
+        "[BoneForge BFA] Host is not Bforartists. "
         "No BoneForge functionality has been registered. "
-        "Signals found: %s", detection_signals() or "none",
+        "Exclusive package validation did not pass.",
     )
 
     _lockout_classes = _build_lockout_classes()
@@ -196,7 +161,7 @@ def register_lockout():
             bpy.utils.register_class(stub_class)
         except Exception:
             logger.exception(
-                "[BoneForge BFA] lockout stub %s failed to register",
+                "[BoneForge BFA] notice stub %s failed to register",
                 stub_class.__name__,
             )
 
@@ -207,7 +172,7 @@ def register_lockout():
 
 
 def unregister_lockout():
-    """Tear the lockout stub back down."""
+    """Tear the notice-only UI back down."""
     global _lockout_classes
     import bpy
 

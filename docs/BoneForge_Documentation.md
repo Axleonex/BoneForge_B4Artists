@@ -43,7 +43,7 @@ BoneForge is a Blender add-on that helps you prepare 3D avatars for VRChat, VRoi
 
 **What BoneForge adds:** BoneForge adds panels and buttons to Blender that automate the most tedious steps — things like organizing bones, fixing names, setting up physics, and exporting in the right format.
 
-**New in BoneForge BFA 8.4.6:** Smart Combine now makes `atlas_uv` the export UV0 by default after baking. The pre-atlas source UV map is removed from the generated atlas mesh unless **Keep Source UV Maps** is enabled in Advanced settings. The CATS / Material Combiner / UVToolkit-derived controls are now shared with the open Blender build; B4Artists exclusivity remains on the production rigging, control, retarget/export, and host-lockout systems.
+**New in BoneForge BFA 8.4.6:** Smart Combine now makes `atlas_uv` the export UV0 by default after baking. The pre-atlas source UV map is removed from the generated atlas mesh unless **Keep Source UV Maps** is enabled in Advanced settings. The CATS / Material Combiner / UVToolkit-derived controls are now shared with the open Blender build; B4Artists exclusivity remains on the production rigging, control, retarget/export, and B4Artists-only release systems.
 
 **New in BoneForge BFA 8.4.5:** Smart Combine now forces source textures to sample the preserved pre-atlas UV during baking, validates the generated atlas mesh before hiding originals, and resets all atlas faces to the final atlas material slot to prevent gray or scrambled robe/clothing chunks.
 
@@ -51,7 +51,7 @@ BoneForge is a Blender add-on that helps you prepare 3D avatars for VRChat, VRoi
 
 **New in BoneForge BFA 8.4.3:** The Material Atlas Combiner includes selectable UV packing methods inside the existing Material Atlas workflow. It includes Smart Pack, Grid Pack, Seeded Variation, Oriented Pack, Fit 0-1 Bounds, Advanced Variation, and Rotation Step, with UV method details recorded in the debug report and bake ledger.
 
-**New in BoneForge BFA 8.4.2:** The Material Atlas Combiner now targets the generated atlas UV during bake while copied source texture nodes explicitly read the pre-atlas UV. This fixes broken robe/clothing atlas results caused by source textures and the baked atlas sampling different UV maps. The selectable material and texture rows from 8.4.1 remain available, and the B4Artists lockout remains unchanged.
+**New in BoneForge BFA 8.4.2:** The Material Atlas Combiner now targets the generated atlas UV during bake while copied source texture nodes explicitly read the pre-atlas UV. This fixes broken robe/clothing atlas results caused by source textures and the baked atlas sampling different UV maps. The selectable material and texture rows from 8.4.1 remain available.
 
 **New in 7.1.3 (preference label cleanup):** Two add-on preference toggles were renamed so they now match the sidebar tab they control. "VRChat Avatar Tools" is now labelled **CATS** (matches the CATS sidebar tab). "Task Board & Sidebar" is now labelled **Rig Builder** (matches the Rig Builder sidebar tab). No tools were removed — only the on/off labels in Edit > Preferences > Add-ons > BoneForge changed.
 
@@ -79,20 +79,19 @@ version numbers do not mean the same payload.
 | Material Combiner | Included | Included |
 | UVToolkit-derived Material Combiner controls | Included, including Advanced Variation and Rotation Step | Included, same CATS / Material Combiner / UVToolkit behavior |
 | Basic BoneForge and Mixamo-style avatar helpers | Included | Included |
-| BFA host lockout | Not included | Included |
+| B4Artists-exclusive release gate | Not included | Included |
 | Production control-rig construction | Not included | B4Artists-exclusive |
 | Smart landmark / joint detection suite | Not included as a BFA production suite | B4Artists-exclusive |
 | Animator control layer | Not included | B4Artists-exclusive |
 | Control Picker / rig UI | Not included | B4Artists-exclusive |
 | Advanced retargeting core and source maps | Not included as a BFA production suite | B4Artists-exclusive |
 | Profile-driven game export | Not included as a BFA production suite | B4Artists-exclusive |
-| BFA marker files | Must not contain `bfa_guard.py` or `BFA_EXCLUSIVE.md` | Must contain `bfa_guard.py` and `BFA_EXCLUSIVE.md` |
 
 The open Blender build is the non-exclusive standard-Blender package. It now
 receives the complete CATS, Material Combiner, and UVToolkit-derived workflow.
 The B4Artists build remains the exclusive package for the production rigging
-suite, host lockout, control rig builder, animator controls, control picker,
-advanced retarget/export systems, and Bforartists-specific packaging.
+suite, control rig builder, animator controls, control picker, advanced
+retarget/export systems, and Bforartists-specific packaging.
 
 ---
 

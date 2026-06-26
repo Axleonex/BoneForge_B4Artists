@@ -208,16 +208,12 @@ class ToolRegistry:
 # Module-level singleton.
 _registry: Optional[ToolRegistry] = None
 
-# BFA-exclusive build — cached host verdict (environment cannot
-# change mid-process, so one check per session is enough; the cache
-# also guarantees teardown keeps working after a re-verify trip).
+# BFA-exclusive build: cache the approved-host verdict for this session.
 _bfa_host_verified: Optional[bool] = None
 
 
 def _verify_bfa_host() -> bool:
-    """Defense-in-depth layer 3: independent inline copy of the
-    Bforartists host check (intentionally NOT delegated to
-    ``bfa_guard`` — each layer must stand alone)."""
+    """Return whether the current host is approved for this build."""
     global _bfa_host_verified
     if _bfa_host_verified is not None:
         return _bfa_host_verified
@@ -265,9 +261,7 @@ def _verify_bfa_host() -> bool:
 def get_registry() -> ToolRegistry:
     """Return the process-wide tool registry, lazy-initialised.
 
-    BFA-exclusive: refuses to hand out the registry in standard
-    Blender, so no feature manifest can ever be registered or
-    enabled there.
+    The BFA-exclusive package exposes the registry only in Bforartists.
     """
     global _registry
     if not _verify_bfa_host():

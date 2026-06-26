@@ -1,11 +1,8 @@
 """BoneForge BFA — Modular Rigging Extension, exclusive to Bforartists.
 
-**This build runs only in Bforartists.** ``register()`` verifies the
-host via :mod:`boneforge.bfa_guard` before anything functional loads;
-in standard Blender only a lockout notice is registered. Independent
-inline re-checks live in ``core/__init__.py`` and
-``core/tool_registry.py``, and a timer re-verifies the host after
-startup (defense in depth — see ``BFA_EXCLUSIVE.md``).
+**This build runs only in Bforartists.** ``register()`` performs
+internal runtime validation before loading feature packages. In
+standard Blender, only an install guidance notice is registered.
 
 Add-on entry point. Reads ``bl_info`` for the add-on browser,
 registers an i18n layer, then walks every feature package in
@@ -233,9 +230,9 @@ def _save_enabled_set(context=None):
         traceback.print_exc()
 
 
-# -- Bforartists exclusivity (defense-in-depth layer 1: entry gate) ----
+# -- Bforartists-exclusive runtime validation ---------------------------
 
-# True while the lockout stub (not the real add-on) is registered.
+# True while the notice-only stub is registered.
 _lockout_active = False
 
 # Set False by unregister() so the re-verify timer stops cleanly.
@@ -243,10 +240,7 @@ _reverify_enabled = False
 
 
 def _bfa_environment_ok():
-    """Independent inline host check — intentionally NOT delegated to
-    :mod:`boneforge.bfa_guard`, so neutering that module does not
-    neuter this gate. Keep in sync with the copies in
-    ``core/__init__.py`` and ``core/tool_registry.py``."""
+    """Return whether the current host is approved for this build."""
     import sys
     try:
         import bpy
@@ -280,9 +274,7 @@ def _bfa_environment_ok():
 
 
 def _bfa_reverify():
-    """Timer callback (defense-in-depth layer 4): re-check the host
-    after startup and periodically; if the check no longer passes,
-    tear the whole add-on down and swap in the lockout stub."""
+    """Periodic validation callback for the exclusive build."""
     global _reverify_enabled, _lockout_active
     if not _reverify_enabled:
         return None  # unregistered — stop the timer
@@ -318,10 +310,9 @@ def register():
 
     Sequence:
 
-    0. Verify the host is Bforartists (twice: entry-gate copy above
-       AND ``bfa_guard``). If either says no, register only the
-       lockout stub and return — nothing functional loads in
-       standard Blender.
+    0. Validate the host before registering feature packages. If
+       validation fails, register only the install guidance notice and
+       return.
     1. Purge stale ``boneforge.*`` modules from a previous install.
     2. Register the i18n layer so ``T()`` is available to every panel
        label registered in subsequent steps.
@@ -431,8 +422,7 @@ def register():
             "[BoneForge] Properties-editor mirror failed to register",
         )
 
-    # Step 7: arm the post-startup host re-verification timer
-    # (defense-in-depth layer 4).
+    # Step 7: arm the post-startup host validation timer.
     _reverify_enabled = True
     try:
         import bpy
@@ -471,7 +461,7 @@ def unregister():
     except Exception:
         pass
 
-    # Lockout mode: only the stub was registered — drop it and stop.
+    # Notice-only mode: only the stub was registered; drop it and stop.
     if _lockout_active:
         try:
             from boneforge import bfa_guard

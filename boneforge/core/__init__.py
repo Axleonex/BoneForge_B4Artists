@@ -160,13 +160,7 @@ __all__ = [
 
 
 def _require_bfa_host():
-    """BFA-exclusive build — defense-in-depth layer 2.
-
-    Independent inline copy of the Bforartists host check (do NOT
-    replace with an import from ``bfa_guard``; each layer must stand
-    alone). Raises ``RuntimeError`` in standard Blender so core never
-    registers even if the entry-point gate was bypassed.
-    """
+    """Validate that this exclusive build is running in Bforartists."""
     import sys
     try:
         import bpy
