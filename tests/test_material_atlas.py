@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ATLAS = ROOT / "boneforge" / "vrchat" / "cats" / "material_atlas.py"
 UV_PACKING = ROOT / "boneforge" / "vrchat" / "cats" / "uv_tools" / "packing.py"
+UV_INIT = ROOT / "boneforge" / "vrchat" / "cats" / "uv_tools" / "__init__.py"
 SIDEBAR = ROOT / "boneforge" / "taskboard" / "sidebar.py"
 CATS_PANEL = ROOT / "boneforge" / "vrchat" / "cats" / "cats_panel.py"
 INIT = ROOT / "boneforge" / "__init__.py"
@@ -79,14 +80,140 @@ def test_material_atlas_exports_atlas_uv_as_uv0_by_default():
 def test_material_atlas_has_bfa_uv_method_integration():
     source = ATLAS.read_text(encoding="utf-8")
     uv_source = UV_PACKING.read_text(encoding="utf-8")
+    uv_init = UV_INIT.read_text(encoding="utf-8")
 
     assert "from boneforge.vrchat.cats.uv_tools import" in source
     assert "apply_atlas_uv_method(context, joined, settings" in source
     assert "summarize_atlas_uv_result(uv_result)" in source
     assert "items=atlas_uv_method_items(include_advanced=True)" in source
     assert "uv_rotation_step" in source
-    assert "BFA_RANDOM_ORIENTED" in uv_source
+    assert 'ADVANCED_VARIATION = "ADVANCED_VARIATION"' in uv_source
+    assert "BFA_RANDOM_ORIENTED = ADVANCED_VARIATION" in uv_source
+    assert "_LEGACY_METHOD_ALIASES" in uv_source
+    assert "_LEGACY_BFA_RANDOM_ORIENTED: ADVANCED_VARIATION" in uv_source
+    assert "ADVANCED_VARIATION" in uv_init
+    assert "BFA_RANDOM_ORIENTED" in uv_init
     assert "Advanced Variation" in uv_source
+
+
+def test_material_atlas_preserves_source_uvs_by_default():
+    source = ATLAS.read_text(encoding="utf-8")
+    uv_source = UV_PACKING.read_text(encoding="utf-8")
+
+    assert 'default="SOURCE_PRESERVE"' in source
+    assert "SOURCE_PRESERVE = \"SOURCE_PRESERVE\"" in uv_source
+    assert "Preserve Source UVs" in uv_source
+    assert "def _copy_source_uvs_to_atlas_tiles" in uv_source
+    assert "source_uv = mesh.uv_layers.get(source_uv_name)" in uv_source
+    assert "_activate_uv_layer(obj.data, \"atlas_uv\", render=True)" in uv_source
+    assert "Source UV maps missing; used Smart Pack" in uv_source
+
+
+def test_material_atlas_has_manual_output_material_type_override():
+    source = ATLAS.read_text(encoding="utf-8")
+
+    assert "_OUTPUT_MATERIAL_TYPE_ITEMS" in source
+    assert "output_material_type: EnumProperty" in source
+    assert 'default="AUTO"' in source
+    assert 'adv_col.prop(settings, "output_material_type", text=T("Material Output Type"))' in source
+    assert "def _resolve_output_render_type" in source
+    assert "output_render_type = _resolve_output_render_type(group, settings)" in source
+    assert 'if output_render_type == "Alpha Blend"' in source
+    assert 'elif output_render_type == "Alpha Clip"' in source
+    assert 'elif output_render_type == "Emissive"' in source
+    assert 'joined["boneforge_atlas_output_material_type"]' in source
+    assert 'joined["boneforge_atlas_output_material_mode"]' in source
+
+
+def test_material_atlas_has_manual_output_surface_override():
+    source = ATLAS.read_text(encoding="utf-8")
+
+    assert "_OUTPUT_SURFACE_SHADER_ITEMS" in source
+    assert "output_surface_shader: EnumProperty" in source
+    assert 'adv_col.prop(settings, "output_surface_shader", text=T("Surface Output"))' in source
+    assert "def _resolve_output_surface_shader" in source
+    assert "output_surface_shader = _resolve_output_surface_shader(settings)" in source
+    assert 'nodes.new("ShaderNodeBsdfPrincipled")' in source
+    assert 'nodes.new("ShaderNodeBsdfDiffuse")' in source
+    assert 'nodes.new("ShaderNodeEmission")' in source
+    assert 'nodes.new("ShaderNodeBsdfTransparent")' in source
+    assert 'nodes.new("ShaderNodeMixShader")' in source
+    assert 'joined["boneforge_atlas_output_surface_shader"]' in source
+    assert 'joined["boneforge_atlas_output_surface_mode"]' in source
+
+
+def test_smart_combine_preflights_before_nested_bake_operator():
+    source = ATLAS.read_text(encoding="utf-8")
+
+    assert "BF_OT_VRC_AtlasBake()" not in source
+    assert "@staticmethod\n    def _build_preflight(context):" in source
+    assert "preflight = BF_OT_VRC_AtlasBake._build_preflight(context)" in source
+    assert 'if preflight["errors"]:' in source
+    assert 'return {"CANCELLED"}' in source
+    assert "except RuntimeError as bake_err:" in source
+    assert "str(bake_err).splitlines()[-1]" in source
+
+
+def test_material_atlas_preserves_alpha_cutout_masks():
+    source = ATLAS.read_text(encoding="utf-8")
+
+    assert "ROLE_ALPHA" in source
+    assert "from array import array" in source
+    assert "def _find_alpha_source_image_node" in source
+    assert 'output_name="Alpha"' not in source
+    assert 'node_label = getattr(node, "label", "") or node.name' in source
+    assert "def _bake_alpha_mask_to_atlas" in source
+    assert 'target.name = "BF_ALPHA_TARGET"' in source
+    assert '"Bake atlas alpha mask"' in source
+    assert "type=\"EMIT\"" in source
+    assert "def _copy_mask_luminance_to_image_alpha" in source
+    assert "target_pixels[index + 3]" in source
+    assert "needs_alpha_atlas = _group_needs_alpha_atlas(joined, output_render_type)" in source
+    assert "_bake_alpha_mask_to_atlas(context, joined, atlas_img, settings, atlas_name, res)" in source
+
+
+def test_material_atlas_output_section_uses_clean_ui_labels():
+    source = ATLAS.read_text(encoding="utf-8")
+
+    assert 'adv_col.prop(settings, "color_fallback_size", text=T("Fallback Size"))' in source
+    assert 'adv_col.prop(settings, "output_format", text=T("Format Output"))' in source
+    assert 'adv_col.prop(settings, "output_material_type", text=T("Material Output Type"))' in source
+    assert 'adv_col.prop(settings, "output_surface_shader", text=T("Surface Output"))' in source
+    assert 'adv_col.prop(settings, "output_path", text=T("Path Output"))' in source
+
+
+def test_material_atlas_backup_duplicate_toggle_is_near_analyze_row():
+    source = ATLAS.read_text(encoding="utf-8")
+
+    assert 'name="Preserve Backup Duplicate"' in source
+    assert "Create and keep a visible pre-atlas duplicate for Revert." in source
+    assert "Turn off to remove originals after atlasing without a backup duplicate." in source
+    assert 'backup_row.prop(settings, "preserve_originals", text=T("Preserve Backup Duplicate"))' in source
+    assert 'text=T("Off: no Revert backup; originals are removed after atlasing")' in source
+    assert source.index('tool_row.operator("boneforge.vrc_atlas_analyze"') < source.index(
+        'backup_row.prop(settings, "preserve_originals", text=T("Preserve Backup Duplicate"))'
+    )
+    assert source.index('backup_row.prop(settings, "preserve_originals", text=T("Preserve Backup Duplicate"))') < source.index(
+        'accept_row.operator('
+    )
+    assert 'text=T("Accept — Delete Backup")' in source
+    assert 'text=T("Revert — Restore Originals")' in source
+    assert 'backup_row = layout.row(align=True)' not in source
+    assert 'preserve_row.prop(settings, "preserve_originals")' not in source
+    assert "hidden pre-atlas duplicate" not in source
+    assert "WARNING: Originals will not be backed up" not in source
+
+
+def test_material_atlas_backup_duplicates_are_visible_by_default():
+    source = ATLAS.read_text(encoding="utf-8")
+
+    assert '"""Duplicate all target meshes into a visible backup collection."""' in source
+    assert "Backup collection: {_BACKUP_COLLECTION_PREFIX}[timestamp] (visible)" in source
+    assert "dup.hide_set(False)" in source
+    assert "dup.hide_viewport = False" in source
+    assert "dup.hide_render = False" in source
+    assert "layer_coll.hide_viewport = False" in source
+    assert "layer_coll.hide_viewport = True" not in source
 
 
 def test_taskboard_icons_are_valid_for_bforartists_52():
@@ -105,7 +232,7 @@ def test_bfa_release_identity_and_lockout_files():
     init_source = INIT.read_text(encoding="utf-8")
 
     assert '"name": "BoneForge BFA"' in init_source
-    assert '"version": (8, 4, 6)' in init_source
+    assert '"version": (8, 5, 0)' in init_source
     assert (ROOT / "boneforge" / "bfa_guard.py").exists()
     assert (ROOT / "boneforge" / "BFA_EXCLUSIVE.md").exists()
-    assert (ROOT / "releases" / "BoneForge-BFA-8.4.6.zip").exists()
+    assert (ROOT / "releases" / "BoneForge-BFA-8.5.0.zip").exists()

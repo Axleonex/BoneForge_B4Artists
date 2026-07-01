@@ -1,6 +1,7 @@
 """CATS Material Combiner UV helpers for BoneForge."""
 
 from .packing import (
+    ADVANCED_VARIATION,
     BFA_RANDOM_ORIENTED,
     FIT_BOUNDS,
     GRID_PACK,
@@ -15,6 +16,7 @@ from .packing import (
 )
 
 __all__ = [
+    "ADVANCED_VARIATION",
     "BFA_RANDOM_ORIENTED",
     "FIT_BOUNDS",
     "GRID_PACK",

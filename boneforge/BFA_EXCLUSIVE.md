@@ -14,7 +14,7 @@ intentionally not documented here.
 |---|---|---|
 | Host support | Standard Blender | Bforartists |
 | Repository | `Axleonex/BoneForge_ALTERNATIVE_CATS_for_5.0_Blender` | `Axleonex/BoneForge_B4Artists` |
-| Release zip | `BoneForge-8.4.6.zip` | `BoneForge-BFA-8.4.6.zip` |
+| Release zip | `BoneForge-8.5.0.zip` | `BoneForge-BFA-8.5.0.zip` |
 | CATS avatar cleanup | Included | Included |
 | Material Atlas Combiner | Included | Included |
 | Selectable materials and textures | Included | Included |

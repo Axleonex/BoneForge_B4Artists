@@ -6,7 +6,7 @@ inside Bforartists. All bone names use the BoneForge convention `base-Side`
 (hyphen side suffix, e.g. `upperarm.fk-L`, `roll_heel-L`).
 
 Scope note: CATS, Material Combiner, and UVToolkit-derived Material Combiner
-controls are shared with the open Blender build as of BoneForge 8.4.6. This
+controls are shared with the open Blender build as of BoneForge 8.5.0. This
 document covers what still remains B4Artists-exclusive: the production rigging
 suite, control rig builder, animator controls, control picker, advanced
 retarget/export systems, and Bforartists-specific packaging.
