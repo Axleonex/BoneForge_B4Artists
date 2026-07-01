@@ -4,7 +4,7 @@ Run with:  python3 test_bfa_lock.py   (from the BoneForge-BFA-8.3.1 dir)
 """
 import os, pathlib
 BUILD_ROOT = str(pathlib.Path(__file__).resolve().parent)
-import sys, types, importlib
+import contextlib, io, sys, types, importlib
 
 def make_fake_bpy(binary_path, bfa_attr, resource_base):
     bpy = types.ModuleType('bpy')
@@ -16,7 +16,9 @@ def make_fake_bpy(binary_path, bfa_attr, resource_base):
         @classmethod
         def is_registered(cls, fn): return fn in cls.registered
         @classmethod
-        def unregister(cls, fn): cls.registered.remove(fn)
+        def unregister(cls, fn):
+            if fn in cls.registered:
+                cls.registered.remove(fn)
 
     app = types.SimpleNamespace(binary_path=binary_path, timers=Timers,
                                 version=(4, 5, 0))
@@ -51,7 +53,10 @@ def make_fake_bpy(binary_path, bfa_attr, resource_base):
 
     utils_mod = types.ModuleType('bpy.utils')
     utils_mod.register_class = lambda c: registered.append(c)
-    utils_mod.unregister_class = lambda c: registered.remove(c)
+    def _unregister_class(c):
+        if c in registered:
+            registered.remove(c)
+    utils_mod.unregister_class = _unregister_class
     app.handlers = types.SimpleNamespace(persistent=lambda f: f,
                                          load_post=[], save_pre=[])
     bpy._submodules = {'bpy.types': types_mod, 'bpy.props': props_mod,
@@ -89,7 +94,8 @@ assert bfa_guard.detection_signals() == [], bfa_guard.detection_signals()
 assert not bfa_guard.is_bforartists()
 assert not bf._bfa_environment_ok()
 
-bf.register()
+with contextlib.redirect_stderr(io.StringIO()):
+    bf.register()
 assert bf._lockout_active, 'lockout flag not set'
 names = sorted(c.__name__ for c in bpy._registered)
 assert names == ['BONEFORGE_OT_get_bforartists', 'BoneForgeLockedPreferences'], names
@@ -169,7 +175,8 @@ assert bf4._bfa_reverify() == 600.0   # healthy -> reschedule
 del bpy4.app.bforartists_version
 bpy4.app.binary_path = r'C:\x\blender.exe'
 bpy4.utils.resource_path = lambda kind: r'C:\x\blender\4.5'
-assert bf4._bfa_reverify() is None    # tripped -> stop timer
+with contextlib.redirect_stderr(io.StringIO()):
+    assert bf4._bfa_reverify() is None    # tripped -> stop timer
 assert bf4._lockout_active
 assert sorted(c.__name__ for c in bpy4._registered) == [
     'BONEFORGE_OT_get_bforartists', 'BoneForgeLockedPreferences']
