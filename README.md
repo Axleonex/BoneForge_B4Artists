@@ -74,7 +74,7 @@ the `.zip`.
 
 The B4Artists package is the exclusive build. The open Blender package remains
 the non-exclusive standard-Blender build focused on CATS, Material Combiner, and
-basic BoneForge/Mixamo-style avatar helpers.
+basic Rigify/Mixamo-style avatar helpers.
 
 | Area | Open Blender BoneForge | BoneForge B4Artists Exclusive |
 |---|---|---|
