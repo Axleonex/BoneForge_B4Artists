@@ -8,7 +8,7 @@ notice with a "Get Bforartists" button and nothing else.
 | | |
 |---|---|
 | **Tool** | BoneForge BFA |
-| **Version** | 8.6.1 |
+| **Version** | 8.6.2 |
 | **Host** | Bforartists 4.0+ (tested through 5.2) — **not** standard Blender |
 | **Category** | Rigging / Animation |
 | **License** | GPL v2.0 or later |
@@ -57,7 +57,7 @@ poll trick), so each package pays its cost only when you turn it on.
 
 The ready-to-install add-on lives in [`releases/`](releases/):
 
-- **[`BoneForge-BFA-8.6.1.zip`](https://github.com/Axleonex/BoneForge_B4Artists/raw/main/releases/BoneForge-BFA-8.6.1.zip)** — or grab it from the [Releases](../../releases) page.
+- **[`BoneForge-BFA-8.6.2.zip`](https://github.com/Axleonex/BoneForge_B4Artists/raw/main/releases/BoneForge-BFA-8.6.2.zip)** — or grab it from the [Releases](../../releases) page.
 
 > **Install this in Bforartists, not Blender.** If you load it in standard
 > Blender you will see only a single *Get Bforartists* notice and no panels —
@@ -66,7 +66,7 @@ The ready-to-install add-on lives in [`releases/`](releases/):
 To install in **Bforartists**:
 
 1. **Edit → Preferences → Add-ons → Install from Disk…**
-2. Pick `BoneForge-BFA-8.6.1.zip`.
+2. Pick `BoneForge-BFA-8.6.2.zip`.
 3. Enable the add-on by ticking its checkbox.
 4. Open the **N-panel** in the 3D Viewport — BoneForge adds a **Rig Builder**
    tab; Properties → Object Data gains a mirror panel for the active armature.
@@ -84,7 +84,7 @@ basic Rigify/Mixamo-style avatar helpers.
 |---|---|---|
 | Host support | Standard Blender | Bforartists |
 | Repository | `Axleonex/BoneForge_ALTERNATIVE_CATS_for_5.0_Blender` | `Axleonex/BoneForge_B4Artists` |
-| Release zip | `BoneForge-8.6.1.zip` | `BoneForge-BFA-8.6.1.zip` |
+| Release zip | `BoneForge-8.6.2.zip` | `BoneForge-BFA-8.6.2.zip` |
 | CATS avatar cleanup | Included | Included |
 | Material Atlas Combiner | Included | Included |
 | Selectable materials and textures | Included | Included |
