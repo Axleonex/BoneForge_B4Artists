@@ -118,8 +118,7 @@ def test_material_atlas_has_manual_output_material_type_override():
     assert 'adv_col.prop(settings, "output_material_type", text=T("Material Output Type"))' in source
     assert "def _resolve_output_render_type" in source
     assert "output_render_type = _resolve_output_render_type(group, settings)" in source
-    assert 'if output_render_type == "Alpha Blend"' in source
-    assert 'elif output_render_type == "Alpha Clip"' in source
+    assert 'if output_render_type in ("Alpha Blend", "Alpha Clip")' in source
     assert 'elif output_render_type == "Emissive"' in source
     assert 'joined["boneforge_atlas_output_material_type"]' in source
     assert 'joined["boneforge_atlas_output_material_mode"]' in source
@@ -172,7 +171,20 @@ def test_material_atlas_preserves_alpha_cutout_masks():
     assert "_bake_alpha_mask_to_atlas(context, joined, atlas_img, settings, atlas_name, res)" in source
 
 
+
+def test_material_atlas_uses_cycles_safe_mtoon_albedo_bake_and_post_bake_debug():
+    source = ATLAS.read_text(encoding="utf-8")
+
+    assert "def _find_albedo_source_image_node" in source
+    assert "def _build_albedo_bake_material" in source
+    assert "def _bake_albedo_to_atlas" in source
+    assert '"Bake atlas albedo"' in source
+    assert 'type="DIFFUSE"' not in source
+    assert "_bake_albedo_to_atlas(context, joined, atlas_img, settings)" in source
+    assert "_store_debug_report(context, result_meshes, settings)" in source
+
 def test_material_atlas_output_section_uses_clean_ui_labels():
+
     source = ATLAS.read_text(encoding="utf-8")
 
     assert 'adv_col.prop(settings, "color_fallback_size", text=T("Fallback Size"))' in source
@@ -232,7 +244,7 @@ def test_bfa_release_identity_and_lockout_files():
     init_source = INIT.read_text(encoding="utf-8")
 
     assert '"name": "BoneForge BFA"' in init_source
-    assert '"version": (8, 5, 0)' in init_source
+    assert '"version": (8, 6, 3)' in init_source
     assert (ROOT / "boneforge" / "bfa_guard.py").exists()
     assert (ROOT / "boneforge" / "BFA_EXCLUSIVE.md").exists()
-    assert (ROOT / "releases" / "BoneForge-BFA-8.5.0.zip").exists()
+    assert (ROOT / "releases" / "BoneForge-BFA-8.6.3.zip").exists()
