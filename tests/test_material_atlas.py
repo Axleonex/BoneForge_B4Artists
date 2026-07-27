@@ -246,10 +246,10 @@ def test_bfa_release_identity_and_lockout_files():
     init_source = INIT.read_text(encoding="utf-8")
 
     assert '"name": "BoneForge BFA"' in init_source
-    assert '"version": (8, 6, 4)' in init_source
+    assert '"version": (8, 6, 5)' in init_source
     assert (ROOT / "boneforge" / "bfa_guard.py").exists()
     assert (ROOT / "boneforge" / "BFA_EXCLUSIVE.md").exists()
-    assert (ROOT / "releases" / "BoneForge-BFA-8.6.4.zip").exists()
+    assert (ROOT / "releases" / "BoneForge-BFA-8.6.5.zip").exists()
 
 
 def test_alpha_blend_preservation_is_explained_in_preflight_and_panel():
