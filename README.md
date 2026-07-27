@@ -8,7 +8,7 @@ notice with a "Get Bforartists" button and nothing else.
 | | |
 |---|---|
 | **Tool** | BoneForge BFA |
-| **Version** | 8.6.3 |
+| **Version** | 8.6.4 |
 | **Host** | Bforartists 4.0+ (tested through 5.2) — **not** standard Blender |
 | **Category** | Rigging / Animation |
 | **License** | GPL v2.0 or later |
@@ -17,11 +17,11 @@ notice with a "Get Bforartists" button and nothing else.
 > If you hit an issue, a screenshot or a note about what you were doing helps a
 > lot — please open an [issue](../../issues).
 
-## What's new in 8.6.3
+## What's new in 8.6.4
 
-- The shared CATS Material Atlas now bakes MToon base-color textures through temporary Cycles-safe graphs, preventing black RGB tiles in combined VRM/VRoid atlases.
-- Texture-driven and nested MToon alpha sources are preserved instead of falling back to opaque black blocks.
-- **Copy Debug** now refreshes after a successful bake and includes the generated atlas object's per-tile diagnostics.
+- The shared CATS Material Atlas now classifies each used material slot independently, so one transparent clothing or hair material no longer turns the entire mesh into an Alpha Blend atlas.
+- Alpha Blend geometry is preserved by default as a compact `KEPT_` mesh, protecting VRChat draw order while the opaque materials bake into one atlas.
+- Empty material slots are excluded from analysis and output; backup/revert still preserves the untouched original.
 ## What it does
 
 BoneForge is a universal rig UI plus a full rigging/animation toolkit, organized
@@ -62,7 +62,7 @@ poll trick), so each package pays its cost only when you turn it on.
 
 The ready-to-install add-on lives in [`releases/`](releases/):
 
-- **[`BoneForge-BFA-8.6.3.zip`](https://github.com/Axleonex/BoneForge_B4Artists/raw/main/releases/BoneForge-BFA-8.6.3.zip)** — or grab it from the [Releases](../../releases) page.
+- **[`BoneForge-BFA-8.6.4.zip`](https://github.com/Axleonex/BoneForge_B4Artists/raw/main/releases/BoneForge-BFA-8.6.4.zip)** — or grab it from the [Releases](../../releases) page.
 
 > **Install this in Bforartists, not Blender.** If you load it in standard
 > Blender you will see only a single *Get Bforartists* notice and no panels —
@@ -71,7 +71,7 @@ The ready-to-install add-on lives in [`releases/`](releases/):
 To install in **Bforartists**:
 
 1. **Edit → Preferences → Add-ons → Install from Disk…**
-2. Pick `BoneForge-BFA-8.6.3.zip`.
+2. Pick `BoneForge-BFA-8.6.4.zip`.
 3. Enable the add-on by ticking its checkbox.
 4. Open the **N-panel** in the 3D Viewport — BoneForge adds a **Rig Builder**
    tab; Properties → Object Data gains a mirror panel for the active armature.
@@ -89,7 +89,7 @@ basic Rigify/Mixamo-style avatar helpers.
 |---|---|---|
 | Host support | Standard Blender | Bforartists |
 | Repository | `Axleonex/BoneForge_ALTERNATIVE_CATS_for_5.0_Blender` | `Axleonex/BoneForge_B4Artists` |
-| Release zip | `BoneForge-8.6.3.zip` | `BoneForge-BFA-8.6.3.zip` |
+| Release zip | `BoneForge-8.6.4.zip` | `BoneForge-BFA-8.6.4.zip` |
 | CATS avatar cleanup | Included | Included |
 | Material Atlas Combiner | Included | Included |
 | Selectable materials and textures | Included | Included |

@@ -17,7 +17,9 @@ def test_material_atlas_has_selectable_sources():
     assert "class BF_AtlasTextureItem" in source
     assert "class BF_UL_VRC_AtlasMaterials" in source
     assert "class BF_UL_VRC_AtlasTextures" in source
-    assert "_populate_group_sources(group, objs)" in source
+    assert "_populate_group_sources(" in source
+    assert "allowed_slot_keys=slot_keys" in source
+    assert "plan_material_slot_groups(slot_sources)" in source
     assert "_group_enabled_material_count(group)" in source
     assert "_group_enabled_texture_count(group)" in source
     assert "def _route_source_image_nodes_to_uv" in source
@@ -244,7 +246,23 @@ def test_bfa_release_identity_and_lockout_files():
     init_source = INIT.read_text(encoding="utf-8")
 
     assert '"name": "BoneForge BFA"' in init_source
-    assert '"version": (8, 6, 3)' in init_source
+    assert '"version": (8, 6, 4)' in init_source
     assert (ROOT / "boneforge" / "bfa_guard.py").exists()
     assert (ROOT / "boneforge" / "BFA_EXCLUSIVE.md").exists()
-    assert (ROOT / "releases" / "BoneForge-BFA-8.6.3.zip").exists()
+    assert (ROOT / "releases" / "BoneForge-BFA-8.6.4.zip").exists()
+
+
+def test_alpha_blend_preservation_is_explained_in_preflight_and_panel():
+    source = ATLAS.read_text(encoding="utf-8")
+
+    assert "preserved automatically for render order" in source
+    assert "Enable manually only if draw-order changes are acceptable" in source
+
+
+def test_only_successful_atlas_groups_retire_source_materials():
+    source = ATLAS.read_text(encoding="utf-8")
+
+    assert "completed_groups = []" in source
+    assert "completed_groups.append(group)" in source
+    assert "context, completed_groups, settings" in source
+    assert "def _dominant_render_type" not in source
